@@ -44,33 +44,35 @@ function App() {
       />
       <main className="main-content">
         <UpdateBanner onOpenSettings={() => setPage("settings")} />
-        {page === "home" && (
-          <PasteLinkPanel
-            key={catalogUrl}
-            initialUrl={catalogUrl}
-            onDownloadStarted={() => setPage("downloads")}
-          />
-        )}
-        {page === "catalog" && (
-          <CatalogGrid
-            onSelectAnime={handleCatalogSelect}
-            onDownloadStarted={() => setPage("downloads")}
-          />
-        )}
-        {page === "downloads" && (
-          <DownloadQueue
-            downloads={downloads}
-            onCancel={cancel}
-            onRetry={retry}
-            onPause={pause}
-            onResume={resume}
-            onPauseAnime={pauseAnime}
-            onResumeAnime={resumeAnime}
-            onCancelAnime={cancelAnime}
-            onRemove={remove}
-          />
-        )}
-        {page === "settings" && <SettingsPanel />}
+        <div key={page} className="page-view">
+          {page === "home" && (
+            <PasteLinkPanel
+              key={catalogUrl}
+              initialUrl={catalogUrl}
+              onDownloadStarted={() => setPage("downloads")}
+            />
+          )}
+          {page === "catalog" && (
+            <CatalogGrid
+              onSelectAnime={handleCatalogSelect}
+              onDownloadStarted={() => setPage("downloads")}
+            />
+          )}
+          {page === "downloads" && (
+            <DownloadQueue
+              downloads={downloads}
+              onCancel={cancel}
+              onRetry={retry}
+              onPause={pause}
+              onResume={resume}
+              onPauseAnime={pauseAnime}
+              onResumeAnime={resumeAnime}
+              onCancelAnime={cancelAnime}
+              onRemove={remove}
+            />
+          )}
+          {page === "settings" && <SettingsPanel />}
+        </div>
       </main>
     </div>
   );

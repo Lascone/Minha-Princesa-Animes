@@ -47,10 +47,12 @@ jobs:
           releaseBody: |
             ## Minha Princesa Animes v__VERSION__
 
-            Instale o `.exe` (NSIS) ou `.msi` abaixo. O app instalado verifica atualizações automaticamente via GitHub Releases.
+            ### Novidades
+            - Visual renovado com gradientes e animações suaves
+            - Correção de travamento na fila após muitos downloads
+            - Melhorias de estabilidade nos downloads simultâneos
 
-            ### Notas
-            Veja o changelog no repositório.
-          releaseDraft: true
+            Instale o `.exe` (NSIS) ou `.msi` abaixo. O app verifica atualizações automaticamente via GitHub Releases.
+          releaseDraft: false
           prerelease: false
           args: --target x86_64-pc-windows-msvc

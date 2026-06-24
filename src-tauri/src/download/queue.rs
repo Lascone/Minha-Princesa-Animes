@@ -34,6 +34,8 @@ async fn fetch_stream_with_headers(
 
     reqwest::Client::builder()
         .default_headers(headers)
+        .timeout(Duration::from_secs(120))
+        .connect_timeout(Duration::from_secs(30))
         .build()?
         .get(url)
         .send()
@@ -137,7 +139,20 @@ impl DownloadManager {
     }
 
     async fn persist_item(&self, item: &DownloadItem) {
-        let _ = self.persist_item_sync(item);
+        let db = StdArc::clone(&self.db);
+        let item = item.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(db) = db.lock() {
+                let _ = db.upsert_download(&item);
+            }
+        })
+        .await;
+    }
+
+    async fn cleanup_job_state(&self, id: &str) {
+        self.progress_throttle.lock().await.remove(id);
+        self.stop_flags.lock().await.remove(id);
+        self.child_slots.lock().await.remove(id);
     }
 
     async fn restore_stopped_state(
@@ -249,11 +264,14 @@ impl DownloadManager {
     async fn worker_loop(&self, app: AppHandle) {
         loop {
             let mut spawned = false;
-            while let Some((id, anime_title, episode, settings)) = self.next_runnable_job().await
+            while let Some((id, anime_title, episode, settings)) = self.claim_next_job().await
             {
                 let permit = match self.semaphore.clone().try_acquire_owned() {
                     Ok(p) => p,
-                    Err(_) => break,
+                    Err(_) => {
+                        self.requeue_claimed_job(&id).await;
+                        break;
+                    }
                 };
 
                 spawned = true;
@@ -300,7 +318,7 @@ impl DownloadManager {
         })
     }
 
-    async fn next_runnable_job(&self) -> Option<(String, String, EpisodeInfo, AppSettings)> {
+    async fn claim_next_job(&self) -> Option<(String, String, EpisodeInfo, AppSettings)> {
         let settings = self.load_settings()?;
         let mut candidates: Vec<_> = {
             let items = self.items.lock().await;
@@ -317,13 +335,40 @@ impl DownloadManager {
                 .collect()
         };
         candidates.sort_by_key(|i| i.updated_at);
-        let item = candidates.first()?;
-        Some((
-            item.id.clone(),
-            item.anime_title.clone(),
-            item.episode.clone(),
-            settings,
-        ))
+
+        let mut items = self.items.lock().await;
+        for candidate in candidates {
+            let Some(item) = items.get_mut(&candidate.id) else {
+                continue;
+            };
+            if item.status != DownloadStatus::Queued {
+                continue;
+            }
+            item.status = DownloadStatus::Downloading;
+            item.progress = 0.0;
+            item.speed = "Iniciando...".to_string();
+            item.updated_at = unix_now();
+            return Some((
+                item.id.clone(),
+                item.anime_title.clone(),
+                item.episode.clone(),
+                settings,
+            ));
+        }
+        None
+    }
+
+    async fn requeue_claimed_job(&self, id: &str) {
+        let mut items = self.items.lock().await;
+        let Some(item) = items.get_mut(id) else {
+            return;
+        };
+        if item.status == DownloadStatus::Downloading {
+            item.status = DownloadStatus::Queued;
+            item.progress = 0.0;
+            item.speed = String::new();
+            item.updated_at = unix_now();
+        }
     }
 
     fn load_settings(&self) -> Option<AppSettings> {
@@ -673,6 +718,24 @@ impl DownloadManager {
         episode: EpisodeInfo,
         settings: AppSettings,
     ) {
+        struct JobGuard {
+            mgr: DownloadManager,
+            id: String,
+        }
+        impl Drop for JobGuard {
+            fn drop(&mut self) {
+                let mgr = self.mgr.clone_inner();
+                let id = self.id.clone();
+                tauri::async_runtime::spawn(async move {
+                    mgr.cleanup_job_state(&id).await;
+                });
+            }
+        }
+        let _guard = JobGuard {
+            mgr: self.clone_inner(),
+            id: id.clone(),
+        };
+
         if self.is_stopped(&id).await {
             self.restore_stopped_state(&app, &id, None).await;
             return;
@@ -692,8 +755,6 @@ impl DownloadManager {
             ) {
                 return;
             }
-            item.status = DownloadStatus::Downloading;
-            item.progress = 0.0;
             item.speed = "Resolvendo link do vídeo...".to_string();
         })
         .await;
