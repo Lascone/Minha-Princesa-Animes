@@ -105,6 +105,8 @@ function Set-TauriSigningEnv {
   $env:TAURI_SIGNING_PRIVATE_KEY = Get-SigningKeyEnvValue -KeyPath $keyPath
   if ([string]::IsNullOrEmpty($Password)) {
     Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+    $env:CI = "true"
   } else {
     $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $Password
   }
@@ -498,7 +500,7 @@ Coloque o arquivo na raiz do projeto e rode novamente: .\preparar.ps1 -Build
     }
     Write-Step "Gerando instalador de producao"
     try {
-        Invoke-TauriCli -TauriArgs @("build")
+        Invoke-TauriCli -TauriArgs @("build", "--ci")
         Write-Ok "Build concluido"
     } catch {
         throw

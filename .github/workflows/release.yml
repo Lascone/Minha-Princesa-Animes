@@ -40,7 +40,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CI: true
         with:
           tagName: v__VERSION__
           releaseName: Minha Princesa Animes v__VERSION__
@@ -57,4 +57,4 @@ jobs:
             Instale o `.exe` (NSIS) ou `.msi` abaixo. O app verifica atualizações automaticamente via GitHub Releases.
           releaseDraft: false
           prerelease: false
-          args: --target x86_64-pc-windows-msvc
+          args: --target x86_64-pc-windows-msvc --ci
