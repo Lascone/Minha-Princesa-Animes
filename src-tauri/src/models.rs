@@ -1,5 +1,33 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum AnimeSourceId {
+    #[default]
+    Sushianimes,
+    Goyabu,
+}
+
+impl AnimeSourceId {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Sushianimes => "Sushi Animes",
+            Self::Goyabu => "Goyabu",
+        }
+    }
+
+    pub fn detect_from_url(url: &str) -> Option<Self> {
+        let lower = url.to_lowercase();
+        if lower.contains("goyabu.io") || lower.contains("goyabu.") {
+            return Some(Self::Goyabu);
+        }
+        if lower.contains("sushianimes.com.br") {
+            return Some(Self::Sushianimes);
+        }
+        None
+    }
+}
+
 pub const APP_DATA_DIR: &str = "Minha Princesa Animes";
 pub const APP_DOWNLOAD_DIR: &str = "Minha Princesa Animes";
 
@@ -164,6 +192,8 @@ pub struct SearchRequest {
     pub page: u32,
     #[serde(default)]
     pub filters: CatalogFilters,
+    #[serde(default)]
+    pub source: AnimeSourceId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,4 +204,6 @@ pub struct BrowseRequest {
     pub category_slug: Option<String>,
     #[serde(default)]
     pub filters: CatalogFilters,
+    #[serde(default)]
+    pub source: AnimeSourceId,
 }

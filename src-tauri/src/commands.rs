@@ -1,45 +1,26 @@
 use crate::models::{
-    AnimeInfo, AppSettings, BrowseRequest, CatalogPage, CategoryInfo, DownloadItem, DownloadRequest,
-    SearchRequest,
+    AnimeInfo, AnimeSourceId, AppSettings, BrowseRequest, CatalogPage, CategoryInfo, DownloadItem,
+    DownloadRequest, SearchRequest,
 };
-use crate::state::AppState;
-use crate::sushi::client::SushiClient;
-use crate::sushi::{
-    apply_catalog_filters, browse_catalog as sushi_browse, parse_anime_page, parse_categories,
-    search_catalog as sushi_search,
-};
+use crate::sources::{self, source_for_url, SourceError};
 use crate::download::{resolve_ffmpeg_path, FfmpegSource};
 use base64::Engine;
 use serde::Serialize;
 use tauri::State;
+use crate::state::AppState;
 
 #[tauri::command]
 pub async fn parse_anime_url(url: String) -> Result<AnimeInfo, String> {
-    let client = SushiClient::new().map_err(|e| e.to_string())?;
-    let normalized = SushiClient::normalize_url(&url);
-
-    if !SushiClient::is_supported_watch_url(&normalized) {
-        return Err(
-            "URL inválida. Cole um link de anime (/anime/...) ou filme (/assistir/...)."
-                .to_string(),
-        );
-    }
-
-    if SushiClient::is_episode_url(&normalized) {
-        let re = regex::Regex::new(r"-\d+-season-\d+-episode").unwrap();
-        let anime_url = re
-            .split(&normalized)
-            .next()
-            .unwrap_or(&normalized)
-            .to_string();
-        return parse_anime_page(&client, &anime_url)
-            .await
-            .map_err(|e| e.to_string());
-    }
-
-    parse_anime_page(&client, &normalized)
+    let source = source_for_url(&url).map_err(|e| e.to_string())?;
+    sources::parse_anime(source, &url)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| match e {
+            SourceError::UnsupportedUrl => {
+                "URL inválida. Cole um link de anime ou episódio do Sushi Animes ou Goyabu."
+                    .to_string()
+            }
+            other => other.to_string(),
+        })
 }
 
 #[tauri::command]
@@ -47,8 +28,9 @@ pub async fn search_catalog(
     req: SearchRequest,
     state: State<'_, AppState>,
 ) -> Result<CatalogPage, String> {
+    let source = req.source;
     let cache_key = format!(
-        "search:{}:{}:{:?}:{:?}",
+        "search:{source:?}:{}:{}:{:?}:{:?}",
         req.query, req.page, req.filters.media_filter, req.filters.sort
     );
     if let Ok(db) = state.db.lock() {
@@ -57,11 +39,9 @@ pub async fn search_catalog(
         }
     }
 
-    let client = SushiClient::new().map_err(|e| e.to_string())?;
-    let result = sushi_search(&client, &req.query, req.page)
+    let result = sources::search(source, &req)
         .await
         .map_err(|e| e.to_string())?;
-    let result = apply_catalog_filters(result, &req.filters);
 
     if req.page == 1 && !req.query.is_empty() {
         if let Ok(db) = state.db.lock() {
@@ -78,8 +58,9 @@ pub async fn browse_catalog(
     req: BrowseRequest,
     state: State<'_, AppState>,
 ) -> Result<CatalogPage, String> {
+    let source = req.source;
     let cache_key = format!(
-        "browse:{:?}:{}:{}:{:?}:{:?}",
+        "browse:{source:?}:{:?}:{}:{}:{:?}:{:?}",
         req.catalog_type,
         req.page,
         req.category_slug.as_deref().unwrap_or(""),
@@ -96,16 +77,9 @@ pub async fn browse_catalog(
         }
     }
 
-    let client = SushiClient::new().map_err(|e| e.to_string())?;
-    let result = sushi_browse(
-        &client,
-        req.catalog_type,
-        req.page,
-        req.category_slug.as_deref(),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let result = apply_catalog_filters(result, &req.filters);
+    let result = sources::browse(source, &req)
+        .await
+        .map_err(|e| e.to_string())?;
 
     if let Ok(db) = state.db.lock() {
         let _ = db.cache_catalog(&cache_key, &result.items);
@@ -115,9 +89,9 @@ pub async fn browse_catalog(
 }
 
 #[tauri::command]
-pub async fn get_categories() -> Result<Vec<CategoryInfo>, String> {
-    let client = SushiClient::new().map_err(|e| e.to_string())?;
-    parse_categories(&client)
+pub async fn get_categories(source: Option<AnimeSourceId>) -> Result<Vec<CategoryInfo>, String> {
+    let source = source.unwrap_or_default();
+    sources::categories(source)
         .await
         .map_err(|e| e.to_string())
 }
@@ -302,9 +276,8 @@ pub async fn fetch_poster(url: String, state: State<'_, AppState>) -> Result<Opt
         }
     }
 
-    let client = SushiClient::new().map_err(|e| e.to_string())?;
-    let bytes = client
-        .fetch_image(trimmed)
+    let source = source_for_url(trimmed).unwrap_or(AnimeSourceId::Sushianimes);
+    let bytes = sources::fetch_image(source, trimmed)
         .await
         .map_err(|e| e.to_string())?;
 

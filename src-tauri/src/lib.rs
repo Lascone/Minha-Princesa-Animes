@@ -2,6 +2,7 @@ mod commands;
 mod db;
 mod download;
 mod models;
+mod sources;
 mod state;
 mod sushi;
 

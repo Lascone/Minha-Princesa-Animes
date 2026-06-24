@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
 
 import type { AnimeInfo, EpisodeInfo } from "../types";
+
+import { detectSourceFromUrl, sourceLabel } from "../utils/source";
 
 import { EpisodePicker, episodeKey } from "./EpisodePicker";
 
@@ -35,6 +37,8 @@ export function PasteLinkPanel({ onDownloadStarted, initialUrl = "" }: PasteLink
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const [downloading, setDownloading] = useState(false);
+
+  const detectedSource = useMemo(() => detectSourceFromUrl(url), [url]);
 
 
 
@@ -178,7 +182,7 @@ export function PasteLinkPanel({ onDownloadStarted, initialUrl = "" }: PasteLink
 
         </h2>
 
-        <p>Cole o link do anime ou filme — séries (/anime/...) ou filmes (/assistir/...)</p>
+        <p>Cole o link do Sushi Animes ou Goyabu — anime, filme ou episódio</p>
 
       </div>
 
@@ -194,7 +198,7 @@ export function PasteLinkPanel({ onDownloadStarted, initialUrl = "" }: PasteLink
 
             type="url"
 
-            placeholder="https://sushianimes.com.br/anime/... ou /assistir/..."
+            placeholder="https://sushianimes.com.br/anime/... ou https://goyabu.io/anime/..."
 
             value={url}
 
@@ -229,6 +233,18 @@ export function PasteLinkPanel({ onDownloadStarted, initialUrl = "" }: PasteLink
         </button>
 
       </div>
+
+
+
+      {detectedSource && (
+
+        <div className="paste-source-badge">
+
+          <Icon name="fa-database" /> Fonte: {sourceLabel(detectedSource)}
+
+        </div>
+
+      )}
 
 
 
@@ -275,9 +291,13 @@ export function PasteLinkPanel({ onDownloadStarted, initialUrl = "" }: PasteLink
                 <span className="chip-meta">
 
                   <Icon name="fa-film" />{" "}
+
                   {totalEpisodes === 1 &&
+
                   anime.seasons[0]?.episodes[0]?.description === "Filme"
+
                     ? "Filme"
+
                     : `${totalEpisodes} episódio(s)`}
 
                 </span>
@@ -383,5 +403,4 @@ export function PasteLinkPanel({ onDownloadStarted, initialUrl = "" }: PasteLink
   );
 
 }
-
 

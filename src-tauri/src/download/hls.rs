@@ -1,5 +1,5 @@
 use crate::download::process_util;
-use crate::sushi::client::SushiClient;
+use crate::sushi::client::USER_AGENT_STR;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,7 +25,8 @@ pub async fn download_hls(
     ffmpeg_path: &str,
     stream_url: &str,
     output_path: &Path,
-    referer: Option<&str>,
+    referer: &str,
+    origin: &str,
     stop_flag: Arc<AtomicBool>,
     child_slot: Arc<AsyncMutex<Option<Child>>>,
     on_progress: impl Fn(f64) + Send + Sync,
@@ -34,7 +35,9 @@ pub async fn download_hls(
         std::fs::create_dir_all(parent)?;
     }
 
-    let headers = SushiClient::ffmpeg_headers_arg(referer);
+    let headers = format!(
+        "Referer: {referer}\r\nOrigin: {origin}\r\nUser-Agent: {USER_AGENT_STR}\r\n"
+    );
 
     let mut cmd = Command::new(ffmpeg_path);
     cmd.args([

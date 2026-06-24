@@ -2,8 +2,9 @@ use crate::db::CacheDb;
 use crate::download::validate::{is_valid_episode_file, should_redownload};
 use crate::download::{build_output_path, ensure_ffmpeg_path, hls};
 use crate::models::{AppSettings, DownloadItem, DownloadRequest, DownloadStatus, EpisodeInfo};
-use crate::sushi::client::SushiClient;
-use crate::sushi::{parse_episode_embed_id, resolve_stream_url, StreamKind};
+use crate::sources::{self, source_for_url, StreamKind};
+use crate::sushi::client::USER_AGENT_STR;
+use reqwest::header::{HeaderMap, HeaderValue, ORIGIN, REFERER, USER_AGENT};
 use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,6 +18,26 @@ use uuid::Uuid;
 
 const PROGRESS_EMIT_MIN_MS: u64 = 500;
 const PROGRESS_PERSIST_MIN_MS: u64 = 1000;
+const MP4_PROGRESS_CHUNK_BYTES: u64 = 512 * 1024;
+
+async fn fetch_stream_with_headers(
+    url: &str,
+    referer: &str,
+    origin: &str,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut headers = HeaderMap::new();
+    headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_STR));
+    headers.insert(REFERER, HeaderValue::from_str(referer).unwrap_or_else(|_| HeaderValue::from_static("")));
+    headers.insert(ORIGIN, HeaderValue::from_str(origin).unwrap_or_else(|_| HeaderValue::from_static("")));
+
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()?
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()
+}
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -614,7 +635,6 @@ impl DownloadManager {
         .await;
 
         let output_path = build_output_path(&settings, &anime_title, &episode);
-        let referer = Some(episode.url.as_str());
 
         if output_path.exists()
             && !settings.overwrite
@@ -634,16 +654,16 @@ impl DownloadManager {
             let _ = tokio::fs::remove_file(&output_path).await;
         }
 
-        let client = match SushiClient::new() {
-            Ok(c) => c,
+        let source = match source_for_url(&episode.url) {
+            Ok(s) => s,
             Err(e) => {
                 self.fail(&app, &id, e.to_string()).await;
                 return;
             }
         };
 
-        let embed_id = match parse_episode_embed_id(&client, &episode.url).await {
-            Ok(embed) => embed,
+        let stream = match sources::resolve_stream(source, &episode.url).await {
+            Ok(s) => s,
             Err(e) => {
                 self.fail(&app, &id, e.to_string()).await;
                 return;
@@ -655,23 +675,15 @@ impl DownloadManager {
             return;
         }
 
-        let stream = match resolve_stream_url(&client, &embed_id).await {
-            Ok(s) => s,
-            Err(e) => {
-                self.fail(&app, &id, e.to_string()).await;
-                return;
-            }
-        };
-
         let result = self
             .download_with_fallback(
                 &app,
                 &id,
-                &client,
                 &settings,
                 &stream.url,
                 stream.kind,
-                referer,
+                &stream.referer,
+                &stream.origin,
                 &output_path,
                 stop_flag,
             )
@@ -733,21 +745,21 @@ impl DownloadManager {
         &self,
         app: &AppHandle,
         id: &str,
-        client: &SushiClient,
         settings: &AppSettings,
         url: &str,
         kind: StreamKind,
-        referer: Option<&str>,
+        referer: &str,
+        origin: &str,
         output: &PathBuf,
         stop_flag: StdArc<AtomicBool>,
     ) -> Result<(), String> {
         let primary = match kind {
             StreamKind::Hls => {
-                self.download_hls(app, id, settings, url, referer, output, stop_flag.clone())
+                self.download_hls(app, id, settings, url, referer, origin, output, stop_flag.clone())
                     .await
             }
             StreamKind::Mp4 => {
-                self.download_mp4(app, id, client, url, referer, output, stop_flag.clone())
+                self.download_mp4(app, id, url, referer, origin, output, stop_flag.clone())
                     .await
             }
         };
@@ -765,7 +777,7 @@ impl DownloadManager {
             let ffmpeg_path = self.resolved_ffmpeg(settings).await?;
             if hls::ffmpeg_available(&ffmpeg_path) {
                 return self
-                    .download_hls(app, id, settings, url, referer, output, stop_flag)
+                    .download_hls(app, id, settings, url, referer, origin, output, stop_flag)
                     .await
                     .map_err(|e| format!("{primary_err}; fallback HLS: {e}"));
             }
@@ -800,7 +812,8 @@ impl DownloadManager {
         id: &str,
         settings: &AppSettings,
         url: &str,
-        referer: Option<&str>,
+        referer: &str,
+        origin: &str,
         output: &PathBuf,
         stop_flag: StdArc<AtomicBool>,
     ) -> Result<(), String> {
@@ -824,16 +837,33 @@ impl DownloadManager {
             url,
             output,
             referer,
+            origin,
             stop_flag.clone(),
             child_slot,
-            move |progress| {
+            {
                 let mgr = mgr.clone_inner();
                 let app = app.clone();
-                let id = id_owned.clone();
-                tauri::async_runtime::spawn(async move {
-                    mgr.update_progress_throttled(&app, &id, progress, "FFmpeg", false)
-                        .await;
-                });
+                let id_owned = id_owned.clone();
+                let gate = StdArc::new(std::sync::Mutex::new((Instant::now(), 0.0f64)));
+                move |progress| {
+                    let mut g = gate.lock().unwrap_or_else(|e| e.into_inner());
+                    let now = Instant::now();
+                    if now.duration_since(g.0).as_millis() < PROGRESS_EMIT_MIN_MS as u128
+                        && (progress - g.1).abs() < 5.0
+                    {
+                        return;
+                    }
+                    g.0 = now;
+                    g.1 = progress;
+                    drop(g);
+                    let mgr = mgr.clone_inner();
+                    let app = app.clone();
+                    let id = id_owned.clone();
+                    tauri::async_runtime::spawn(async move {
+                        mgr.update_progress_throttled(&app, &id, progress, "Convertendo vídeo…", false)
+                            .await;
+                    });
+                }
             },
         )
         .await;
@@ -857,9 +887,9 @@ impl DownloadManager {
         &self,
         app: &AppHandle,
         id: &str,
-        client: &SushiClient,
         url: &str,
-        referer: Option<&str>,
+        referer: &str,
+        origin: &str,
         output: &PathBuf,
         stop_flag: StdArc<AtomicBool>,
     ) -> Result<(), String> {
@@ -867,8 +897,7 @@ impl DownloadManager {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
 
-        let response = client
-            .fetch_stream(url, referer)
+        let response = fetch_stream_with_headers(url, referer, origin)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -885,6 +914,10 @@ impl DownloadManager {
 
         use tokio::io::AsyncWriteExt;
 
+        let started = Instant::now();
+        let mut last_progress_at = Instant::now();
+        let mut last_reported_bytes: u64 = 0;
+
         while let Some(chunk) = stream.next().await {
             if stop_flag.load(Ordering::Relaxed) || self.is_stopped(id).await {
                 let _ = tokio::fs::remove_file(output).await;
@@ -897,14 +930,30 @@ impl DownloadManager {
             file.write_all(&chunk).await.map_err(|e| e.to_string())?;
             downloaded += chunk.len() as u64;
 
-            let progress = if total > 0 {
-                (downloaded as f64 / total as f64) * 100.0
-            } else {
-                50.0
-            };
+            let should_update = downloaded.saturating_sub(last_reported_bytes) >= MP4_PROGRESS_CHUNK_BYTES
+                || last_progress_at.elapsed().as_millis() >= PROGRESS_EMIT_MIN_MS as u128;
 
-            self.update_progress_throttled(app, id, progress, "Baixando...", false)
-                .await;
+            if should_update {
+                last_reported_bytes = downloaded;
+                last_progress_at = Instant::now();
+
+                let progress = if total > 0 {
+                    (downloaded as f64 / total as f64) * 100.0
+                } else {
+                    50.0
+                };
+
+                let elapsed = started.elapsed().as_secs_f64().max(0.1);
+                let speed_label = if total > 0 {
+                    let mbps = (downloaded as f64 / 1_048_576.0) / elapsed;
+                    format!("{mbps:.1} MB/s")
+                } else {
+                    "Baixando…".to_string()
+                };
+
+                self.update_progress_throttled(app, id, progress, &speed_label, false)
+                    .await;
+            }
         }
 
         Ok(())
@@ -934,49 +983,47 @@ impl Default for DownloadManager {
 mod integration_tests {
     use super::*;
     use crate::download::hls;
-    use crate::sushi::{parse_episode_embed_id, resolve_stream_url, StreamKind};
+    use crate::models::AnimeSourceId;
+    use crate::sources::{self, StreamKind};
 
-    #[tokio::test]
-    #[ignore = "rede + ffmpeg: cargo test download_rezero_ep1 -- --ignored --nocapture"]
-    async fn download_rezero_ep1() {
+    async fn download_test_episode(episode_url: &str, output_name: &str, min_bytes: u64) {
         use crate::download::validate::is_valid_episode_file;
         use futures_util::StreamExt;
         use std::sync::atomic::AtomicBool;
+        use std::time::Instant;
 
-        let client = SushiClient::new().unwrap();
-        let episode_url = "https://sushianimes.com.br/anime/re-zero-kara-hajimeru-isekai-seikatsu-dublado-989-1-season-1-episode";
-
-        let embed_id = parse_episode_embed_id(&client, episode_url)
-            .await
-            .expect("embed id");
-        let stream = resolve_stream_url(&client, &embed_id)
+        let source = AnimeSourceId::detect_from_url(episode_url).expect("source");
+        let started = Instant::now();
+        let stream = sources::resolve_stream(source, episode_url)
             .await
             .expect("stream");
+        eprintln!("{episode_url} {:?} {} (resolve in {:?})", stream.kind, stream.url, started.elapsed());
 
-        let output = std::env::temp_dir().join("shishi_rezero_s01e01_test.mp4");
+        let output = std::env::temp_dir().join(output_name);
         let _ = std::fs::remove_file(&output);
 
+        let dl_start = Instant::now();
         match stream.kind {
             StreamKind::Hls => {
                 let ffmpeg = "ffmpeg";
-                assert!(hls::ffmpeg_available(ffmpeg));
+                assert!(hls::ffmpeg_available(ffmpeg), "ffmpeg required");
                 let stop = StdArc::new(AtomicBool::new(false));
                 let slot = StdArc::new(AsyncMutex::new(None));
                 hls::download_hls(
                     ffmpeg,
                     &stream.url,
                     &output,
-                    Some(episode_url),
+                    &stream.referer,
+                    &stream.origin,
                     stop,
                     slot,
-                    |_| {},
+                    |p| eprintln!("progress {:.0}%", p),
                 )
                 .await
                 .expect("ffmpeg download");
             }
             StreamKind::Mp4 => {
-                let response = client
-                    .fetch_stream(&stream.url, Some(episode_url))
+                let response = fetch_stream_with_headers(&stream.url, &stream.referer, &stream.origin)
                     .await
                     .expect("fetch mp4");
                 let mut file = tokio::fs::File::create(&output).await.unwrap();
@@ -988,7 +1035,43 @@ mod integration_tests {
             }
         }
 
-        is_valid_episode_file(&output).expect("valid episode file");
+        let size = std::fs::metadata(&output).unwrap().len();
+        eprintln!("ok: {} bytes in {:?} total {:?}", size, dl_start.elapsed(), started.elapsed());
+        is_valid_episode_file(&output).expect("valid episode");
+        assert!(size > min_bytes);
         let _ = std::fs::remove_file(&output);
+    }
+
+    #[tokio::test]
+    #[ignore = "rede + ffmpeg: cargo test download_rezero_ep1 -- --ignored --nocapture"]
+    async fn download_rezero_ep1() {
+        download_test_episode(
+            "https://sushianimes.com.br/anime/re-zero-kara-hajimeru-isekai-seikatsu-dublado-989-1-season-1-episode",
+            "shishi_rezero_s01e01_test.mp4",
+            1_000_000,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "rede + ffmpeg: cargo test download_overlord_ep1 -- --ignored --nocapture"]
+    async fn download_overlord_ep1() {
+        download_test_episode(
+            "https://sushianimes.com.br/anime/overlord-175-1-season-1-episode",
+            "minha_princesa_overlord_s01e01_test.mp4",
+            5_000_000,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "rede + ffmpeg: cargo test resolve_goyabu_episode_71102_stream -- --ignored --nocapture"]
+    async fn resolve_goyabu_episode_71102_stream() {
+        download_test_episode(
+            "https://goyabu.io/71102",
+            "minha_princesa_goyabu_71102_test.mp4",
+            1_000_000,
+        )
+        .await;
     }
 }

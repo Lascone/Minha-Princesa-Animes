@@ -4,6 +4,7 @@ import { PasteLinkPanel } from "./components/PasteLinkPanel";
 import { CatalogGrid } from "./components/CatalogGrid";
 import { DownloadQueue } from "./components/DownloadQueue";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { useDownloads } from "./hooks/useDownloads";
 import type { Page } from "./types";
 import "./styles/app.css";
@@ -40,6 +41,7 @@ function App() {
         activeDownloads={activeCount}
       />
       <main className="main-content">
+        <UpdateBanner onOpenSettings={() => setPage("settings")} />
         {page === "home" && (
           <PasteLinkPanel
             key={catalogUrl}

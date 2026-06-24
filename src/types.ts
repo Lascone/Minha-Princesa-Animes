@@ -1,3 +1,5 @@
+export type AnimeSourceId = "sushianimes" | "goyabu";
+
 export type EpisodeInfo = {
   number: number;
   season: number;
@@ -87,6 +89,7 @@ export type SearchRequest = {
   query: string;
   page: number;
   filters?: CatalogFilters;
+  source?: AnimeSourceId;
 };
 
 export type BrowseRequest = {
@@ -94,6 +97,7 @@ export type BrowseRequest = {
   page: number;
   categorySlug?: string | null;
   filters?: CatalogFilters;
+  source?: AnimeSourceId;
 };
 
 export type Page = "home" | "catalog" | "downloads" | "settings";

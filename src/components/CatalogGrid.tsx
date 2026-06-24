@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AnimeSourceId,
   CatalogFilters,
   CatalogItem,
   CatalogPage,
@@ -10,9 +11,11 @@ import type {
   MediaFilter,
 } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { sourceSupportsFilmes } from "../utils/source";
 import { Icon } from "./Icon";
 import { PosterImage } from "./PosterImage";
 import { AnimeAnalyzeModal } from "./AnimeAnalyzeModal";
+import { SourcePicker } from "./SourcePicker";
 
 interface CatalogGridProps {
   onSelectAnime: (url: string) => void;
@@ -20,6 +23,7 @@ interface CatalogGridProps {
 }
 
 export function CatalogGrid({ onSelectAnime, onDownloadStarted }: CatalogGridProps) {
+  const [source, setSource] = useState<AnimeSourceId>("sushianimes");
   const [tab, setTab] = useState<CatalogType>("animes");
   const [page, setPage] = useState(1);
   const [data, setData] = useState<CatalogPage | null>(null);
@@ -64,6 +68,7 @@ export function CatalogGrid({ onSelectAnime, onDownloadStarted }: CatalogGridPro
             query: debouncedQuery.trim(),
             page,
             filters,
+            source,
           },
         });
       } else {
@@ -73,6 +78,7 @@ export function CatalogGrid({ onSelectAnime, onDownloadStarted }: CatalogGridPro
             page,
             categorySlug: tab === "category" ? categorySlug || "acao" : null,
             filters,
+            source,
           },
         });
       }
@@ -80,12 +86,19 @@ export function CatalogGrid({ onSelectAnime, onDownloadStarted }: CatalogGridPro
     } finally {
       setLoading(false);
     }
-  }, [tab, page, categorySlug, debouncedQuery, searchMode, filters]);
+  }, [tab, page, categorySlug, debouncedQuery, searchMode, filters, source]);
 
   useEffect(() => {
-    invoke<CategoryInfo[]>("get_categories").then(setCategories).catch(() => {});
+    invoke<CategoryInfo[]>("get_categories", { source }).then(setCategories).catch(() => {});
     invoke<string[]>("get_search_history").then(setHistory).catch(() => {});
-  }, []);
+  }, [source]);
+
+  useEffect(() => {
+    if (!sourceSupportsFilmes(source) && tab === "filmes") {
+      setTab("animes");
+      setPage(1);
+    }
+  }, [source, tab]);
 
   useEffect(() => {
     load();
@@ -166,6 +179,16 @@ export function CatalogGrid({ onSelectAnime, onDownloadStarted }: CatalogGridPro
           </div>
         )}
       </div>
+
+      <SourcePicker
+        value={source}
+        onChange={(next) => {
+          setSource(next);
+          setPage(1);
+          setSearchMode(false);
+          setCategorySlug("");
+        }}
+      />
 
       <div className="catalog-filters">
         <div className="filter-group">
@@ -276,6 +299,7 @@ export function CatalogGrid({ onSelectAnime, onDownloadStarted }: CatalogGridPro
               setTab("filmes");
               setPage(1);
             }}
+            style={sourceSupportsFilmes(source) ? undefined : { display: "none" }}
           >
             <Icon name="fa-film" /> Filmes
           </button>
@@ -388,7 +412,10 @@ function CatalogCard({
   onSelect: (url: string) => void;
   onAnalyze: () => void;
 }) {
-  const isMovie = item.url.includes("/filme/") || item.url.includes("/assistir/");
+  const isMovie =
+    item.category?.toLowerCase() === "filme" ||
+    item.url.includes("/filme/") ||
+    item.url.includes("/assistir/");
 
   return (
     <div className="catalog-card">
