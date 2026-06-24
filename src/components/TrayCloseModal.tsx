@@ -52,8 +52,9 @@ export function TrayCloseModal() {
         </div>
         <div className="tray-close-body">
           <p>
-            Os downloads continuam em segundo plano. Você pode minimizar para a{" "}
-            <strong>bandeja do sistema</strong> (ícone perto do relógio) ou sair completamente.
+            Os downloads continuam em segundo plano. Para esconder o app na{" "}
+            <strong>bandeja do sistema</strong>, use o botão abaixo. O botão{" "}
+            <strong>minimizar</strong> da janela também mantém os downloads ativos.
           </p>
           <p className="tray-close-hint">
             <Icon name="fa-circle-info" /> Clique no ícone na bandeja para abrir o app novamente.

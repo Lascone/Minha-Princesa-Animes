@@ -1,12 +1,11 @@
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, Runtime, WebviewWindow, WindowEvent,
+    AppHandle, Manager, Runtime, WebviewWindow,
 };
 
 pub fn hide_to_tray(window: &WebviewWindow) {
     let _ = window.set_skip_taskbar(true);
-    let _ = window.unminimize();
     let _ = window.hide();
 }
 
@@ -52,13 +51,6 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     Ok(())
 }
 
-pub fn attach_window_handlers(window: &WebviewWindow) {
-    let w = window.clone();
-    window.on_window_event(move |event| {
-        if let WindowEvent::Focused(false) = event {
-            if w.is_minimized().unwrap_or(false) {
-                hide_to_tray(&w);
-            }
-        }
-    });
-}
+/// Intentionally empty: auto-hiding on minimize caused Windows to throttle FFmpeg/network.
+/// Use "Minimizar para bandeja" from the close dialog when background mode is desired.
+pub fn attach_window_handlers(_window: &WebviewWindow) {}
