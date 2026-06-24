@@ -433,6 +433,7 @@ export function DownloadQueue({
       {playing && (
 
         <VideoPlayer
+          key={playing.id}
           item={playing}
           nextEpisode={playingNext}
           onNextEpisode={setPlaying}

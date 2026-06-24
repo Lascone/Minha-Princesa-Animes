@@ -1,6 +1,8 @@
 import type { DownloadItem } from "../types";
 
 const STORAGE_KEY = "minha-princesa-watch-progress";
+const DISMISSED_KEY = "minha-princesa-watch-dismissed";
+const PLAYER_PREFS_KEY = "minha-princesa-player-prefs";
 
 export interface WatchProgress {
   outputPath: string;
@@ -10,6 +12,11 @@ export interface WatchProgress {
   position: number;
   duration: number;
   updatedAt: number;
+}
+
+export interface PlayerPrefs {
+  volume: number;
+  speed: number;
 }
 
 function readAll(): Record<string, WatchProgress> {
@@ -27,12 +34,53 @@ function writeAll(data: Record<string, WatchProgress>) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 }
 
+function readDismissed(): Set<string> {
+  try {
+    const raw = localStorage.getItem(DISMISSED_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as string[];
+    return new Set(Array.isArray(parsed) ? parsed : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeDismissed(keys: Set<string>) {
+  localStorage.setItem(DISMISSED_KEY, JSON.stringify([...keys]));
+}
+
 export function watchProgressKey(item: DownloadItem): string {
   return item.outputPath ?? item.id;
 }
 
 export function loadWatchProgress(key: string): WatchProgress | null {
   return readAll()[key] ?? null;
+}
+
+export function getSavedPosition(key: string): number | null {
+  const progress = loadWatchProgress(key);
+  if (!progress || progress.duration <= 0) return null;
+  if (!shouldAutoResume(progress)) return null;
+  if (readDismissed().has(key)) return null;
+  return progress.position;
+}
+
+export function shouldAutoResume(progress: WatchProgress): boolean {
+  if (progress.duration <= 0) return false;
+  const ratio = progress.position / progress.duration;
+  return ratio > 0.02 && ratio < 0.92;
+}
+
+export function dismissResumeForSession(key: string) {
+  const dismissed = readDismissed();
+  dismissed.add(key);
+  writeDismissed(dismissed);
+}
+
+export function clearDismissedResume(key: string) {
+  const dismissed = readDismissed();
+  if (!dismissed.delete(key)) return;
+  writeDismissed(dismissed);
 }
 
 export function saveWatchProgress(
@@ -45,6 +93,7 @@ export function saveWatchProgress(
   const ratio = position / duration;
   if (ratio >= 0.92) {
     clearWatchProgress(watchProgressKey(item));
+    clearDismissedResume(watchProgressKey(item));
     return;
   }
 
@@ -69,6 +118,28 @@ export function clearWatchProgress(key: string) {
   writeAll(all);
 }
 
+export function loadPlayerPrefs(): PlayerPrefs {
+  try {
+    const raw = localStorage.getItem(PLAYER_PREFS_KEY);
+    if (!raw) return { volume: 1, speed: 1 };
+    const parsed = JSON.parse(raw) as PlayerPrefs;
+    return {
+      volume: typeof parsed.volume === "number" ? parsed.volume : 1,
+      speed: typeof parsed.speed === "number" ? parsed.speed : 1,
+    };
+  } catch {
+    return { volume: 1, speed: 1 };
+  }
+}
+
+export function savePlayerPrefs(prefs: Partial<PlayerPrefs>) {
+  const current = loadPlayerPrefs();
+  localStorage.setItem(
+    PLAYER_PREFS_KEY,
+    JSON.stringify({ ...current, ...prefs })
+  );
+}
+
 export function formatPlaybackTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
   const total = Math.floor(seconds);
@@ -84,12 +155,10 @@ export function formatPlaybackTime(seconds: number): string {
 export function findContinueWatching(
   library: DownloadItem[]
 ): { item: DownloadItem; progress: WatchProgress } | null {
+  const dismissed = readDismissed();
   const all = readAll();
   const entries = Object.values(all)
-    .filter((p) => {
-      const ratio = p.duration > 0 ? p.position / p.duration : 0;
-      return ratio > 0.02 && ratio < 0.92;
-    })
+    .filter((p) => shouldAutoResume(p) && !dismissed.has(p.outputPath))
     .sort((a, b) => b.updatedAt - a.updatedAt);
 
   for (const progress of entries) {
