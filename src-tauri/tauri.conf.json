@@ -21,7 +21,7 @@
         "center": true,
         "theme": "Dark",
         "backgroundThrottling": "disabled",
-        "additionalBrowserArgs": "--disable-background-timer-throttling --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"
+        "additionalBrowserArgs": "--disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,msWebView2TreatAppSuspendAsDeviceSuspend"
       }
     ],
     "security": {

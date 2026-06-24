@@ -9,7 +9,16 @@ mod tray;
 
 use download::resolve_ffmpeg_path;
 use state::AppState;
-use tauri::Manager;
+use tauri::{Manager, WebviewWindow};
+
+pub fn on_window_accessible(window: &WebviewWindow) {
+    let win = window.clone();
+    tauri::async_runtime::spawn(async move {
+        let app = win.app_handle();
+        let state = win.state::<AppState>();
+        state.downloads.notify_window_awake(&app).await;
+    });
+}
 
 fn persist_resolved_ffmpeg(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
@@ -52,6 +61,20 @@ pub fn run() {
 
             if let Some(window) = app.get_webview_window("main") {
                 tray::attach_window_handlers(&window);
+
+                let win = window.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut accessible = true;
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                        let is_accessible = win.is_visible().unwrap_or(false)
+                            && !win.is_minimized().unwrap_or(false);
+                        if is_accessible && !accessible {
+                            on_window_accessible(&win);
+                        }
+                        accessible = is_accessible;
+                    }
+                });
             }
 
             let handle = app.handle().clone();
@@ -69,18 +92,6 @@ pub fn run() {
             let ffmpeg_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 prepare_ffmpeg_in_background(ffmpeg_handle).await;
-            });
-
-            let sync_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    let state = sync_handle.state::<AppState>();
-                    state
-                        .downloads
-                        .broadcast_snapshot(&sync_handle)
-                        .await;
-                }
             });
 
             let maintenance_handle = app.handle().clone();

@@ -4,6 +4,8 @@ use tauri::{
     AppHandle, Manager, Runtime, WebviewWindow,
 };
 
+use crate::state::AppState;
+
 pub fn hide_to_tray(window: &WebviewWindow) {
     let _ = window.set_skip_taskbar(true);
     let _ = window.hide();
@@ -17,6 +19,11 @@ pub fn show_from_tray<R: Runtime>(app: &AppHandle<R>) {
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app_handle.state::<AppState>();
+        state.downloads.notify_window_awake(&app_handle).await;
+    });
 }
 
 pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {

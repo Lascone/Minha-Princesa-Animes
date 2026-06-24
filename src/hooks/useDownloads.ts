@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { DownloadItem, DownloadStatus } from "../types";
 
 function patchDownload(
@@ -23,51 +22,43 @@ function patchAnimeDownloads(
   );
 }
 
-/** Evita o WebView2 congelar timers/eventos ao perder foco (workaround Windows). */
-function useBackgroundKeepAlive() {
-  useEffect(() => {
-    const locks = navigator.locks;
-    if (!locks?.request) return;
-
-    const controller = new AbortController();
-
-    locks
-      .request(
-        "minha-princesa-downloads",
-        { mode: "shared", signal: controller.signal },
-        () =>
-          new Promise<void>((resolve) => {
-            controller.signal.addEventListener("abort", () => resolve(), {
-              once: true,
-            });
-          })
-      )
-      .catch(() => undefined);
-
-    return () => controller.abort();
-  }, []);
-}
-
 export function useDownloads() {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
   const optimisticUntil = useRef(0);
+  const lastAwakeSync = useRef(0);
+  const awakeRetryTimer = useRef<number | null>(null);
+
+  const pullFromBackend = useCallback(async () => {
+    return invoke<DownloadItem[]>("get_downloads");
+  }, []);
 
   const refresh = useCallback(async () => {
-    const items = await invoke<DownloadItem[]>("get_downloads");
     if (Date.now() < optimisticUntil.current) return;
+    const items = await pullFromBackend();
     setDownloads(items);
-  }, []);
+  }, [pullFromBackend]);
 
-  const applySnapshot = useCallback((items: DownloadItem[]) => {
-    if (Date.now() < optimisticUntil.current) return;
+  const syncAfterAwake = useCallback(async () => {
+    const now = Date.now();
+    if (now - lastAwakeSync.current < 2000) return;
+    lastAwakeSync.current = now;
+    optimisticUntil.current = 0;
+
+    const items = await pullFromBackend();
     setDownloads(items);
-  }, []);
 
-  useBackgroundKeepAlive();
+    if (awakeRetryTimer.current !== null) {
+      window.clearTimeout(awakeRetryTimer.current);
+    }
+    awakeRetryTimer.current = window.setTimeout(async () => {
+      const retryItems = await pullFromBackend();
+      setDownloads(retryItems);
+      awakeRetryTimer.current = null;
+    }, 500);
+  }, [pullFromBackend]);
 
   useEffect(() => {
-    refresh();
-    const restoreTimer = setTimeout(refresh, 600);
+    void refresh();
 
     const unlistenProgress = listen<DownloadItem>("download-progress", (event) => {
       if (Date.now() < optimisticUntil.current) return;
@@ -82,32 +73,33 @@ export function useDownloads() {
       });
     });
 
-    const unlistenSnapshot = listen<DownloadItem[]>("downloads-snapshot", (event) => {
-      applySnapshot(event.payload);
+    const unlistenAwake = listen("window-awake", () => {
+      void syncAfterAwake();
     });
 
+    const interval = window.setInterval(() => {
+      if (document.visibilityState !== "hidden") {
+        void refresh();
+      }
+    }, 3000);
+
     const onVisibility = () => {
-      if (document.visibilityState === "visible") refresh();
+      if (document.visibilityState === "visible") {
+        void syncAfterAwake();
+      }
     };
     document.addEventListener("visibilitychange", onVisibility);
 
-    // Sempre ativo — perder foco (Alt+Tab) NÃO deve parar o sync.
-    const interval = setInterval(refresh, 3000);
-
-    const win = getCurrentWindow();
-    const unlistenFocus = win.onFocusChanged(({ payload: focused }) => {
-      if (focused) refresh();
-    });
-
     return () => {
-      clearTimeout(restoreTimer);
-      clearInterval(interval);
+      window.clearInterval(interval);
+      if (awakeRetryTimer.current !== null) {
+        window.clearTimeout(awakeRetryTimer.current);
+      }
       document.removeEventListener("visibilitychange", onVisibility);
       unlistenProgress.then((fn) => fn());
-      unlistenSnapshot.then((fn) => fn());
-      unlistenFocus.then((fn) => fn());
+      unlistenAwake.then((fn) => fn());
     };
-  }, [refresh, applySnapshot]);
+  }, [refresh, syncAfterAwake]);
 
   const withOptimistic = (action: () => Promise<void>) => {
     optimisticUntil.current = Date.now() + 1500;

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc as StdArc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Runtime};
 use tokio::process::Child;
 use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore};
 use uuid::Uuid;
@@ -70,6 +70,7 @@ pub struct DownloadManager {
     worker_running: StdArc<AtomicBool>,
     progress_throttle: StdArc<AsyncMutex<HashMap<String, ProgressThrottle>>>,
     active_jobs: StdArc<AsyncMutex<HashSet<String>>>,
+    last_awake: StdArc<AsyncMutex<Instant>>,
     cached_ffmpeg: StdArc<AsyncMutex<Option<String>>>,
     db: StdArc<Mutex<CacheDb>>,
 }
@@ -89,6 +90,7 @@ impl DownloadManager {
             worker_running: StdArc::new(AtomicBool::new(false)),
             progress_throttle: StdArc::new(AsyncMutex::new(HashMap::new())),
             active_jobs: StdArc::new(AsyncMutex::new(HashSet::new())),
+            last_awake: StdArc::new(AsyncMutex::new(Instant::now() - Duration::from_secs(60))),
             cached_ffmpeg: StdArc::new(AsyncMutex::new(None)),
             db,
         }
@@ -323,13 +325,14 @@ impl DownloadManager {
         list
     }
 
-    /// Envia lista completa ao frontend (não depende de timers do WebView2).
-    pub async fn broadcast_snapshot(&self, app: &AppHandle) {
-        if !self.has_queue_work().await {
+    /// Avisa o frontend para buscar estado via invoke (debounced).
+    pub async fn notify_window_awake<R: Runtime>(&self, app: &AppHandle<R>) {
+        let mut last = self.last_awake.lock().await;
+        if last.elapsed() < Duration::from_secs(2) {
             return;
         }
-        let list = self.list().await;
-        let _ = app.emit("downloads-snapshot", list);
+        *last = Instant::now();
+        let _ = app.emit("window-awake", ());
     }
 
     async fn existing_poster_for_anime(&self, anime_title: &str) -> (Option<String>, Option<String>) {
@@ -817,6 +820,7 @@ impl DownloadManager {
             worker_running: StdArc::clone(&self.worker_running),
             progress_throttle: StdArc::clone(&self.progress_throttle),
             active_jobs: StdArc::clone(&self.active_jobs),
+            last_awake: StdArc::clone(&self.last_awake),
             cached_ffmpeg: StdArc::clone(&self.cached_ffmpeg),
             db: StdArc::clone(&self.db),
         }
@@ -949,6 +953,10 @@ impl DownloadManager {
 
     async fn maybe_notify_queue_idle(&self, app: &AppHandle, settings: &AppSettings) {
         if !settings.notifications {
+            return;
+        }
+
+        if !self.active_jobs.lock().await.is_empty() {
             return;
         }
 
