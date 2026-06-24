@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import type { Page } from "../types";
 import { AppLogo } from "./AppLogo";
 import { Icon } from "./Icon";
@@ -16,6 +18,14 @@ interface SidebarProps {
 }
 
 export function Sidebar({ current, onNavigate, activeDownloads }: SidebarProps) {
+  const [appVersion, setAppVersion] = useState("");
+
+  useEffect(() => {
+    getVersion()
+      .then((v) => setAppVersion(v))
+      .catch(() => setAppVersion(""));
+  }, []);
+
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
@@ -40,6 +50,11 @@ export function Sidebar({ current, onNavigate, activeDownloads }: SidebarProps) 
         ))}
       </nav>
       <div className="sidebar-footer">
+        {appVersion && (
+          <p className="sidebar-version">
+            <Icon name="fa-heart" /> v{appVersion}
+          </p>
+        )}
         <p className="sidebar-sources">
           <Icon name="fa-database" /> 5 fontes disponíveis
         </p>

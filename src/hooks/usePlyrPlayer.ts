@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import Plyr from "plyr";
 import type { DownloadItem } from "../types";
@@ -60,6 +60,7 @@ export const PLYR_I18N = {
 const AUTO_NEXT_SECONDS = 5;
 const UP_NEXT_THRESHOLD = 0.9;
 const UP_NEXT_REMAINING_SEC = 45;
+const END_THRESHOLD = 0.985;
 
 export interface UsePlyrPlayerOptions {
   item: DownloadItem;
@@ -72,271 +73,422 @@ export function usePlyrPlayer({
   nextEpisode,
   onNextEpisode,
 }: UsePlyrPlayerOptions) {
+  const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<Plyr | null>(null);
+  const mountedRef = useRef(true);
   const saveTimerRef = useRef<number | null>(null);
   const autoNextTimerRef = useRef<number | null>(null);
   const resumeAppliedRef = useRef(false);
   const userSeekedRef = useRef(false);
   const upNextDismissedRef = useRef(false);
+  const endedOnceRef = useRef(false);
+  const itemRef = useRef(item);
+  const loadTokenRef = useRef(0);
 
   const nextEpisodeRef = useRef(nextEpisode);
   const onNextEpisodeRef = useRef(onNextEpisode);
   nextEpisodeRef.current = nextEpisode;
   onNextEpisodeRef.current = onNextEpisode;
+  itemRef.current = item;
 
   const progressKey = watchProgressKey(item);
 
   const [src, setSrc] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [playerReady, setPlayerReady] = useState(false);
   const [resumeHint, setResumeHint] = useState<string | null>(null);
   const [showResumeChoice, setShowResumeChoice] = useState(false);
   const [pendingResumeTime, setPendingResumeTime] = useState(0);
-  const [playbackProgress, setPlaybackProgress] = useState(0);
-  const [remainingSeconds, setRemainingSeconds] = useState(0);
   const [showUpNext, setShowUpNext] = useState(false);
   const [autoNextCountdown, setAutoNextCountdown] = useState<number | null>(
     null
   );
 
-  useEffect(() => {
-    if (!item.outputPath) {
-      setError("Arquivo não encontrado");
-      setSrc("");
-      setIsLoading(false);
-      return;
-    }
-    try {
-      setSrc(convertFileSrc(item.outputPath));
-      setError("");
-      setIsLoading(true);
-    } catch (e) {
-      setError(String(e));
-      setSrc("");
-      setIsLoading(false);
-    }
-  }, [item.outputPath]);
+  const safeSet = useCallback(<T,>(setter: (v: T) => void, value: T) => {
+    if (mountedRef.current) setter(value);
+  }, []);
 
-  const cancelAutoNext = () => {
+  const cancelAutoNext = useCallback(() => {
     if (autoNextTimerRef.current) {
       window.clearInterval(autoNextTimerRef.current);
       autoNextTimerRef.current = null;
     }
-    setAutoNextCountdown(null);
-  };
+    safeSet(setAutoNextCountdown, null);
+  }, [safeSet]);
 
-  const playNextNow = () => {
-    cancelAutoNext();
-    const next = nextEpisodeRef.current;
-    const onNext = onNextEpisodeRef.current;
-    if (next && onNext) onNext(next);
-  };
-
-  const dismissUpNext = () => {
-    upNextDismissedRef.current = true;
-    setShowUpNext(false);
-  };
-
-  const startFromBeginning = () => {
-    dismissResumeForSession(progressKey);
-    userSeekedRef.current = true;
-    setShowResumeChoice(false);
-    setResumeHint(null);
-    const player = playerRef.current;
-    if (player) {
-      player.currentTime = 0;
-      void player.play();
-    }
-  };
-
-  const applyResume = () => {
-    const player = playerRef.current;
-    if (!player || pendingResumeTime <= 0) {
-      setShowResumeChoice(false);
-      return;
-    }
-    player.currentTime = pendingResumeTime;
-    setResumeHint(`Continuando de ${formatPlaybackTime(pendingResumeTime)}`);
-    setShowResumeChoice(false);
-    resumeAppliedRef.current = true;
-    window.setTimeout(() => setResumeHint(null), 4000);
-    void player.play();
-  };
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !src || error) return;
-
+  const resetEpisodeUi = useCallback(() => {
     resumeAppliedRef.current = false;
     userSeekedRef.current = false;
     upNextDismissedRef.current = false;
-    setShowUpNext(false);
-    setShowResumeChoice(false);
-    setPlaybackProgress(0);
-    setRemainingSeconds(0);
+    endedOnceRef.current = false;
+    safeSet(setShowUpNext, false);
+    safeSet(setShowResumeChoice, false);
+    safeSet(setResumeHint, null);
+    safeSet(setPendingResumeTime, 0);
     cancelAutoNext();
+  }, [cancelAutoNext, safeSet]);
 
-    const prefs = loadPlayerPrefs();
-    const savedPosition = getSavedPosition(progressKey);
+  const playNextNow = useCallback(() => {
+    cancelAutoNext();
+    const next = nextEpisodeRef.current;
+    const onNext = onNextEpisodeRef.current;
+    if (next && onNext) {
+      window.setTimeout(() => onNext(next), 0);
+    }
+  }, [cancelAutoNext]);
 
-    const player = new Plyr(video, {
-      autoplay: false,
-      clickToPlay: true,
-      hideControls: true,
-      resetOnEnd: false,
-      keyboard: { focused: true, global: false },
-      tooltips: { controls: true, seek: true },
-      speed: { selected: prefs.speed, options: [0.5, 0.75, 1, 1.25, 1.5, 2] },
-      volume: prefs.volume,
-      i18n: PLYR_I18N,
-    });
+  const dismissUpNext = useCallback(() => {
+    upNextDismissedRef.current = true;
+    safeSet(setShowUpNext, false);
+  }, [safeSet]);
 
-    playerRef.current = player;
-
-    const onLoadStart = () => setIsLoading(true);
-    const onCanPlay = () => setIsLoading(false);
-
-    const onLoadedMetadata = () => {
-      if (
-        savedPosition &&
-        savedPosition > 0 &&
-        !resumeAppliedRef.current &&
-        !userSeekedRef.current
-      ) {
-        setPendingResumeTime(savedPosition);
-        setShowResumeChoice(true);
-      } else {
-        void player.play();
+  const startFromBeginning = useCallback(() => {
+    dismissResumeForSession(progressKey);
+    userSeekedRef.current = true;
+    safeSet(setShowResumeChoice, false);
+    safeSet(setResumeHint, null);
+    const player = playerRef.current;
+    if (player) {
+      player.currentTime = 0;
+      const playPromise = player.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(() => undefined);
       }
-    };
+    }
+  }, [progressKey, safeSet]);
 
-    const scheduleSave = () => {
-      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = window.setTimeout(() => {
-        saveWatchProgress(item, player.currentTime, player.duration);
-      }, 1500);
-    };
+  const applyResume = useCallback(() => {
+    const player = playerRef.current;
+    if (!player || pendingResumeTime <= 0) {
+      safeSet(setShowResumeChoice, false);
+      return;
+    }
+    player.currentTime = pendingResumeTime;
+    safeSet(setResumeHint, `Continuando de ${formatPlaybackTime(pendingResumeTime)}`);
+    safeSet(setShowResumeChoice, false);
+    resumeAppliedRef.current = true;
+    window.setTimeout(() => safeSet(setResumeHint, null), 4000);
+    const playPromise = player.play();
+    if (playPromise !== undefined) {
+      playPromise.catch(() => undefined);
+    }
+  }, [pendingResumeTime, safeSet]);
 
-    const updateProgressUi = () => {
+  const scheduleSave = useCallback((player: Plyr) => {
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(() => {
+      if (!mountedRef.current) return;
+      saveWatchProgress(itemRef.current, player.currentTime, player.duration);
+    }, 1500);
+  }, []);
+
+  const handleEnded = useCallback(() => {
+    if (endedOnceRef.current) return;
+    endedOnceRef.current = true;
+
+    const currentItem = itemRef.current;
+    clearWatchProgress(watchProgressKey(currentItem));
+    safeSet(setShowUpNext, false);
+
+    const next = nextEpisodeRef.current;
+    const onNext = onNextEpisodeRef.current;
+    if (!next || !onNext) return;
+
+    let remaining = AUTO_NEXT_SECONDS;
+    safeSet(setAutoNextCountdown, remaining);
+    autoNextTimerRef.current = window.setInterval(() => {
+      if (!mountedRef.current) return;
+      remaining -= 1;
+      if (remaining <= 0) {
+        cancelAutoNext();
+        window.setTimeout(() => {
+          if (mountedRef.current) onNext(next);
+        }, 0);
+        return;
+      }
+      safeSet(setAutoNextCountdown, remaining);
+    }, 1000);
+  }, [cancelAutoNext, safeSet]);
+
+  const updateProgressUi = useCallback(
+    (player: Plyr) => {
       const duration = player.duration;
       const current = player.currentTime;
       if (!Number.isFinite(duration) || duration <= 0) return;
 
       const progress = current / duration;
       const remaining = Math.max(0, duration - current);
-      setPlaybackProgress(progress);
-      setRemainingSeconds(remaining);
+
+      if (progress >= END_THRESHOLD && !endedOnceRef.current) {
+        handleEnded();
+        return;
+      }
 
       if (
         !upNextDismissedRef.current &&
+        !endedOnceRef.current &&
         nextEpisodeRef.current &&
         (progress >= UP_NEXT_THRESHOLD || remaining <= UP_NEXT_REMAINING_SEC)
       ) {
-        setShowUpNext(true);
+        safeSet(setShowUpNext, true);
       }
-    };
+    },
+    [handleEnded, safeSet]
+  );
 
-    const onEnded = () => {
-      clearWatchProgress(progressKey);
-      setShowUpNext(false);
-      const next = nextEpisodeRef.current;
-      const onNext = onNextEpisodeRef.current;
-      if (!next || !onNext) return;
+  const loadEpisode = useCallback(
+    (player: Plyr, episodeSrc: string, episodeItem: DownloadItem) => {
+      const token = ++loadTokenRef.current;
+      const key = watchProgressKey(episodeItem);
+      const savedPosition = getSavedPosition(key);
 
-      let remaining = AUTO_NEXT_SECONDS;
-      setAutoNextCountdown(remaining);
-      autoNextTimerRef.current = window.setInterval(() => {
-        remaining -= 1;
-        if (remaining <= 0) {
-          cancelAutoNext();
-          onNext(next);
+      resetEpisodeUi();
+      safeSet(setIsLoading, true);
+      safeSet(setError, "");
+
+      const onReady = () => {
+        window.clearTimeout(loadTimeout);
+        player.off("loadeddata", onReady);
+        player.off("error", onVideoError);
+        if (token !== loadTokenRef.current || !mountedRef.current) return;
+
+        safeSet(setIsLoading, false);
+
+        if (
+          savedPosition &&
+          savedPosition > 0 &&
+          !resumeAppliedRef.current &&
+          !userSeekedRef.current
+        ) {
+          safeSet(setPendingResumeTime, savedPosition);
+          safeSet(setShowResumeChoice, true);
+        } else {
+          const playPromise = player.play();
+          if (playPromise !== undefined) {
+            playPromise.catch(() => undefined);
+          }
+        }
+      };
+
+      const onVideoError = () => {
+        window.clearTimeout(loadTimeout);
+        player.off("loadeddata", onReady);
+        player.off("error", onVideoError);
+        if (token !== loadTokenRef.current || !mountedRef.current) return;
+        safeSet(setError, "Não foi possível reproduzir este episódio");
+        safeSet(setIsLoading, false);
+      };
+
+      const loadTimeout = window.setTimeout(() => {
+        player.off("loadeddata", onReady);
+        player.off("error", onVideoError);
+        if (token !== loadTokenRef.current || !mountedRef.current) return;
+        if (player.duration > 0) {
+          safeSet(setIsLoading, false);
           return;
         }
-        setAutoNextCountdown(remaining);
-      }, 1000);
-    };
+        safeSet(setError, "O vídeo demorou demais para carregar. Tente fechar e abrir de novo.");
+        safeSet(setIsLoading, false);
+      }, 15000);
 
-    const onSeeked = () => {
-      userSeekedRef.current = true;
-      setShowResumeChoice(false);
-      scheduleSave();
-    };
+      player.on("loadeddata", onReady);
+      player.on("error", onVideoError);
 
-    const onTimeUpdate = () => {
-      scheduleSave();
-      updateProgressUi();
-    };
-
-    const onPause = () => {
-      saveWatchProgress(item, player.currentTime, player.duration);
-    };
-
-    const onVolumeChange = () => {
-      savePlayerPrefs({ volume: player.volume });
-    };
-
-    const onRateChange = () => {
-      savePlayerPrefs({ speed: player.speed });
-    };
-
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() !== "n" || e.repeat) return;
-      const target = e.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.isContentEditable)
-      ) {
-        return;
+      try {
+        player.source = {
+          type: "video",
+          title: episodeItem.episodeLabel,
+          sources: [{ src: episodeSrc, type: "video/mp4" }],
+        };
+      } catch {
+        window.clearTimeout(loadTimeout);
+        player.off("loadeddata", onReady);
+        player.off("error", onVideoError);
+        if (token !== loadTokenRef.current) return;
+        safeSet(setError, "Não foi possível carregar o vídeo");
+        safeSet(setIsLoading, false);
       }
-      const next = nextEpisodeRef.current;
-      const onNext = onNextEpisodeRef.current;
-      if (next && onNext) {
-        e.preventDefault();
-        onNext(next);
-      }
-    };
+    },
+    [resetEpisodeUi, safeSet]
+  );
 
-    video.addEventListener("loadstart", onLoadStart);
-    video.addEventListener("canplay", onCanPlay);
-    video.addEventListener("loadedmetadata", onLoadedMetadata);
-    player.on("ended", onEnded);
-    player.on("seeked", onSeeked);
-    player.on("timeupdate", onTimeUpdate);
-    player.on("pause", onPause);
-    player.on("volumechange", onVolumeChange);
-    player.on("ratechange", onRateChange);
-    window.addEventListener("keydown", onKeyDown);
-
+  useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      window.removeEventListener("keydown", onKeyDown);
+      mountedRef.current = false;
       if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
       cancelAutoNext();
-      if (playerRef.current) {
-        saveWatchProgress(
-          item,
-          playerRef.current.currentTime,
-          playerRef.current.duration
-        );
-      }
-      video.removeEventListener("loadstart", onLoadStart);
-      video.removeEventListener("canplay", onCanPlay);
-      video.removeEventListener("loadedmetadata", onLoadedMetadata);
-      player.off("ended", onEnded);
-      player.off("seeked", onSeeked);
-      player.off("timeupdate", onTimeUpdate);
-      player.off("pause", onPause);
-      player.off("volumechange", onVolumeChange);
-      player.off("ratechange", onRateChange);
-      player.destroy();
-      playerRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one Plyr instance per mount; episode switch via parent key
-  }, [src, error, item, progressKey]);
+  }, [cancelAutoNext]);
+
+  useEffect(() => {
+    if (!item.outputPath) {
+      safeSet(setError, "Arquivo não encontrado");
+      safeSet(setSrc, "");
+      safeSet(setIsLoading, false);
+      return;
+    }
+    try {
+      const nextSrc = convertFileSrc(item.outputPath);
+      safeSet(setSrc, nextSrc);
+      safeSet(setError, "");
+
+      const player = playerRef.current;
+      if (player && playerReady) {
+        loadEpisode(player, nextSrc, item);
+      } else {
+        resetEpisodeUi();
+        safeSet(setIsLoading, true);
+      }
+    } catch (e) {
+      safeSet(setError, String(e));
+      safeSet(setSrc, "");
+      safeSet(setIsLoading, false);
+    }
+  }, [item.id, item.outputPath, playerReady, loadEpisode, resetEpisodeUi, safeSet]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    let cancelled = false;
+    let player: Plyr | null = null;
+
+    const initFrame = requestAnimationFrame(() => {
+      if (cancelled || !video.isConnected) return;
+
+      const prefs = loadPlayerPrefs();
+      player = new Plyr(video, {
+        autoplay: false,
+        clickToPlay: true,
+        hideControls: true,
+        resetOnEnd: false,
+        keyboard: { focused: true, global: false },
+        tooltips: { controls: true, seek: true },
+        speed: { selected: prefs.speed, options: [0.5, 0.75, 1, 1.25, 1.5, 2] },
+        volume: prefs.volume,
+        i18n: PLYR_I18N,
+      });
+
+      playerRef.current = player;
+
+      const onLoadStart = () => safeSet(setIsLoading, true);
+      const onCanPlay = () => safeSet(setIsLoading, false);
+
+      const onSeeked = () => {
+        userSeekedRef.current = true;
+        safeSet(setShowResumeChoice, false);
+        if (player) scheduleSave(player);
+      };
+
+      const onTimeUpdate = () => {
+        if (!player) return;
+        scheduleSave(player);
+        updateProgressUi(player);
+      };
+
+      const onPause = () => {
+        if (!player) return;
+        saveWatchProgress(itemRef.current, player.currentTime, player.duration);
+      };
+
+      const onVolumeChange = () => {
+        if (player) savePlayerPrefs({ volume: player.volume });
+      };
+
+      const onRateChange = () => {
+        if (player) savePlayerPrefs({ speed: player.speed });
+      };
+
+      const onEnded = () => handleEnded();
+
+      const onKeyDown = (e: KeyboardEvent) => {
+        if (e.key.toLowerCase() !== "n" || e.repeat) return;
+        const target = e.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === "INPUT" ||
+            target.tagName === "TEXTAREA" ||
+            target.isContentEditable)
+        ) {
+          return;
+        }
+        const next = nextEpisodeRef.current;
+        const onNext = onNextEpisodeRef.current;
+        if (next && onNext) {
+          e.preventDefault();
+          window.setTimeout(() => onNext(next), 0);
+        }
+      };
+
+      video.addEventListener("loadstart", onLoadStart);
+      video.addEventListener("canplay", onCanPlay);
+      player.on("ended", onEnded);
+      player.on("seeked", onSeeked);
+      player.on("timeupdate", onTimeUpdate);
+      player.on("pause", onPause);
+      player.on("volumechange", onVolumeChange);
+      player.on("ratechange", onRateChange);
+      window.addEventListener("keydown", onKeyDown);
+
+      safeSet(setPlayerReady, true);
+
+      const currentItem = itemRef.current;
+      if (currentItem.outputPath) {
+        try {
+          const initialSrc = convertFileSrc(currentItem.outputPath);
+          loadEpisode(player, initialSrc, currentItem);
+        } catch (e) {
+          safeSet(setError, String(e));
+        }
+      }
+
+      (player as Plyr & { __cleanup?: () => void }).__cleanup = () => {
+        window.removeEventListener("keydown", onKeyDown);
+        video.removeEventListener("loadstart", onLoadStart);
+        video.removeEventListener("canplay", onCanPlay);
+        player?.off("ended", onEnded);
+        player?.off("seeked", onSeeked);
+        player?.off("timeupdate", onTimeUpdate);
+        player?.off("pause", onPause);
+        player?.off("volumechange", onVolumeChange);
+        player?.off("ratechange", onRateChange);
+      };
+    });
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(initFrame);
+      loadTokenRef.current += 1;
+
+      const active = playerRef.current as (Plyr & { __cleanup?: () => void }) | null;
+      if (active) {
+        try {
+          saveWatchProgress(
+            itemRef.current,
+            active.currentTime,
+            active.duration
+          );
+        } catch {
+          // player may already be torn down
+        }
+        active.__cleanup?.();
+        try {
+          active.destroy();
+        } catch {
+          // ignore destroy errors
+        }
+        playerRef.current = null;
+      }
+      safeSet(setPlayerReady, false);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Plyr init once per player mount
+  }, []);
 
   return {
+    containerRef,
     videoRef,
     src,
     error,
@@ -344,8 +496,6 @@ export function usePlyrPlayer({
     resumeHint,
     showResumeChoice,
     pendingResumeTime,
-    playbackProgress,
-    remainingSeconds,
     showUpNext,
     autoNextCountdown,
     applyResume,
@@ -354,4 +504,4 @@ export function usePlyrPlayer({
     cancelAutoNext,
     dismissUpNext,
   };
-}
+};

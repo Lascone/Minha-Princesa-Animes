@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 
@@ -11,8 +11,10 @@ import { Icon } from "./Icon";
 import { VideoPlayer } from "./VideoPlayer";
 import { findNextEpisode } from "../utils/library";
 import {
+  clearDismissedResume,
   findContinueWatching,
   formatPlaybackTime,
+  watchProgressKey,
 } from "../utils/watchProgress";
 
 
@@ -374,15 +376,29 @@ export function DownloadQueue({
 
   const completedTotal = downloads.filter((d) => d.status === "completed").length;
 
+  const playingItem = useMemo(() => {
+    if (!playing) return null;
+    return downloads.find((d) => d.id === playing.id) ?? playing;
+  }, [playing, downloads]);
+
   const playingNext = useMemo(
-    () => (playing ? findNextEpisode(playing, downloads) : null),
-    [playing, downloads]
+    () => (playingItem ? findNextEpisode(playingItem, downloads) : null),
+    [playingItem, downloads]
   );
 
   const continueWatching = useMemo(
     () => findContinueWatching(downloads),
     [downloads]
   );
+
+  const handlePlay = useCallback((item: DownloadItem) => {
+    clearDismissedResume(watchProgressKey(item));
+    setPlaying(item);
+  }, []);
+
+  const handleNextEpisode = useCallback((next: DownloadItem) => {
+    setPlaying(next);
+  }, []);
 
 
 
@@ -423,23 +439,20 @@ export function DownloadQueue({
           <button
             type="button"
             className="btn-primary btn-sm"
-            onClick={() => setPlaying(continueWatching.item)}
+            onClick={() => handlePlay(continueWatching.item)}
           >
             <Icon name="fa-forward" /> Retomar
           </button>
         </div>
       )}
 
-      {playing && (
-
+      {playingItem && (
         <VideoPlayer
-          key={playing.id}
-          item={playing}
+          item={playingItem}
           nextEpisode={playingNext}
-          onNextEpisode={setPlaying}
+          onNextEpisode={handleNextEpisode}
           onClose={() => setPlaying(null)}
         />
-
       )}
 
 
@@ -551,7 +564,7 @@ export function DownloadQueue({
             onCancelAnime={onCancelAnime}
             onRemove={onRemove}
 
-            onPlay={setPlaying}
+            onPlay={handlePlay}
 
             playingId={playing?.id ?? null}
 

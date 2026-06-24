@@ -11,7 +11,10 @@ export function UpdateBanner({ onOpenSettings }: UpdateBannerProps) {
   const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
-    checkForUpdates();
+    const timer = window.setTimeout(() => {
+      checkForUpdates();
+    }, 2500);
+    return () => window.clearTimeout(timer);
   }, [checkForUpdates]);
 
   if (dismissed || status !== "available" || !availableVersion) {

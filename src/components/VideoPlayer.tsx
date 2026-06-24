@@ -19,8 +19,8 @@ export function VideoPlayer({
   onClose,
 }: VideoPlayerProps) {
   const {
+    containerRef,
     videoRef,
-    src,
     error,
     isLoading,
     resumeHint,
@@ -41,16 +41,20 @@ export function VideoPlayer({
         <div className="video-player-error">
           <Icon name="fa-circle-exclamation" /> {error}
         </div>
+        <button type="button" className="btn-ghost btn-sm" onClick={onClose}>
+          <Icon name="fa-xmark" /> Fechar
+        </button>
       </div>
     );
   }
 
   return (
     <div className="video-player-panel video-player-panel--cinema">
-      <div className="video-player-cinema-frame plyr-princesa">
+      <div ref={containerRef} className="video-player-cinema-frame plyr-princesa">
         <div className="video-player-aspect">
           {isLoading && (
             <div className="video-player-loading" aria-hidden="true">
+              <div className="video-player-loading-glow" />
               <Icon name="fa-spinner" spin />
               <span>Carregando episódio…</span>
             </div>
@@ -80,7 +84,6 @@ export function VideoPlayer({
           <video
             ref={videoRef}
             className="video-player"
-            src={src}
             playsInline
             preload="metadata"
           />

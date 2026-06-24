@@ -219,6 +219,24 @@ body {
   border-top: 1px solid var(--border);
 }
 
+.sidebar-version {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  margin: 0 0 0.65rem;
+  background: var(--gradient-brand);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.sidebar-version i {
+  color: var(--accent);
+  -webkit-text-fill-color: initial;
+}
+
 .sidebar-footer a {
   display: flex;
   align-items: center;
