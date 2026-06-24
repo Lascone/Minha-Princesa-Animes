@@ -19,7 +19,9 @@
         "minWidth": 900,
         "minHeight": 600,
         "center": true,
-        "theme": "Dark"
+        "theme": "Dark",
+        "backgroundThrottling": "disabled",
+        "additionalBrowserArgs": "--disable-background-timer-throttling --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"
       }
     ],
     "security": {

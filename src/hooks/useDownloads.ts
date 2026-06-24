@@ -25,14 +25,11 @@ function patchAnimeDownloads(
 
 /** Evita o WebView2 congelar timers/eventos ao perder foco (workaround Windows). */
 function useBackgroundKeepAlive() {
-  const abortRef = useRef<AbortController | null>(null);
-
   useEffect(() => {
     const locks = navigator.locks;
     if (!locks?.request) return;
 
     const controller = new AbortController();
-    abortRef.current = controller;
 
     locks
       .request(
@@ -53,10 +50,16 @@ function useBackgroundKeepAlive() {
 
 export function useDownloads() {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
-  const visibleRef = useRef(true);
+  const optimisticUntil = useRef(0);
 
   const refresh = useCallback(async () => {
     const items = await invoke<DownloadItem[]>("get_downloads");
+    if (Date.now() < optimisticUntil.current) return;
+    setDownloads(items);
+  }, []);
+
+  const applySnapshot = useCallback((items: DownloadItem[]) => {
+    if (Date.now() < optimisticUntil.current) return;
     setDownloads(items);
   }, []);
 
@@ -67,6 +70,7 @@ export function useDownloads() {
     const restoreTimer = setTimeout(refresh, 600);
 
     const unlistenProgress = listen<DownloadItem>("download-progress", (event) => {
+      if (Date.now() < optimisticUntil.current) return;
       setDownloads((prev) => {
         const idx = prev.findIndex((d) => d.id === event.payload.id);
         if (idx >= 0) {
@@ -78,19 +82,20 @@ export function useDownloads() {
       });
     });
 
+    const unlistenSnapshot = listen<DownloadItem[]>("downloads-snapshot", (event) => {
+      applySnapshot(event.payload);
+    });
+
     const onVisibility = () => {
-      visibleRef.current = document.visibilityState === "visible";
-      if (visibleRef.current) refresh();
+      if (document.visibilityState === "visible") refresh();
     };
     document.addEventListener("visibilitychange", onVisibility);
 
-    const interval = setInterval(() => {
-      if (visibleRef.current) refresh();
-    }, 5000);
+    // Sempre ativo — perder foco (Alt+Tab) NÃO deve parar o sync.
+    const interval = setInterval(refresh, 3000);
 
     const win = getCurrentWindow();
     const unlistenFocus = win.onFocusChanged(({ payload: focused }) => {
-      visibleRef.current = focused;
       if (focused) refresh();
     });
 
@@ -99,118 +104,100 @@ export function useDownloads() {
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisibility);
       unlistenProgress.then((fn) => fn());
+      unlistenSnapshot.then((fn) => fn());
       unlistenFocus.then((fn) => fn());
     };
-  }, [refresh]);
+  }, [refresh, applySnapshot]);
 
-  const cancel = async (id: string) => {
-    setDownloads((prev) =>
-      patchDownload(prev, id, { status: "cancelled", speed: "", progress: 0 })
-    );
-    try {
+  const withOptimistic = (action: () => Promise<void>) => {
+    optimisticUntil.current = Date.now() + 1500;
+    return action().catch(() => refresh());
+  };
+
+  const cancel = (id: string) =>
+    withOptimistic(async () => {
+      setDownloads((prev) =>
+        patchDownload(prev, id, { status: "cancelled", speed: "", progress: 0 })
+      );
       await invoke("cancel_download", { id });
-    } catch {
-      await refresh();
-    }
-  };
+    });
 
-  const pause = async (id: string) => {
-    setDownloads((prev) =>
-      patchDownload(prev, id, { status: "paused", speed: "", progress: 0 })
-    );
-    try {
+  const pause = (id: string) =>
+    withOptimistic(async () => {
+      setDownloads((prev) =>
+        patchDownload(prev, id, { status: "paused", speed: "", progress: 0 })
+      );
       await invoke("pause_download", { id });
-    } catch {
-      await refresh();
-    }
-  };
+    });
 
-  const resume = async (id: string) => {
-    setDownloads((prev) =>
-      patchDownload(prev, id, {
-        status: "queued",
-        speed: "",
-        progress: 0,
-        error: undefined,
-      })
-    );
-    try {
+  const resume = (id: string) =>
+    withOptimistic(async () => {
+      setDownloads((prev) =>
+        patchDownload(prev, id, {
+          status: "queued",
+          speed: "",
+          progress: 0,
+          error: undefined,
+        })
+      );
       await invoke("resume_download", { id });
-    } catch {
-      await refresh();
-    }
-  };
+    });
 
-  const pauseAnime = async (title: string) => {
-    setDownloads((prev) =>
-      patchAnimeDownloads(prev, title, ["downloading", "queued"], {
-        status: "paused",
-        speed: "",
-        progress: 0,
-      })
-    );
-    try {
+  const pauseAnime = (title: string) =>
+    withOptimistic(async () => {
+      setDownloads((prev) =>
+        patchAnimeDownloads(prev, title, ["downloading", "queued"], {
+          status: "paused",
+          speed: "",
+          progress: 0,
+        })
+      );
       await invoke("pause_anime", { title });
-    } catch {
-      await refresh();
-    }
-  };
+    });
 
-  const resumeAnime = async (title: string) => {
-    setDownloads((prev) =>
-      patchAnimeDownloads(prev, title, ["paused"], {
-        status: "queued",
-        speed: "",
-        progress: 0,
-        error: undefined,
-      })
-    );
-    try {
+  const resumeAnime = (title: string) =>
+    withOptimistic(async () => {
+      setDownloads((prev) =>
+        patchAnimeDownloads(prev, title, ["paused"], {
+          status: "queued",
+          speed: "",
+          progress: 0,
+          error: undefined,
+        })
+      );
       await invoke("resume_anime", { title });
-    } catch {
-      await refresh();
-    }
-  };
+    });
 
-  const cancelAnime = async (title: string) => {
-    setDownloads((prev) =>
-      patchAnimeDownloads(prev, title, ["downloading", "queued", "paused"], {
-        status: "cancelled",
-        speed: "",
-        progress: 0,
-      })
-    );
-    try {
+  const cancelAnime = (title: string) =>
+    withOptimistic(async () => {
+      setDownloads((prev) =>
+        patchAnimeDownloads(prev, title, ["downloading", "queued", "paused"], {
+          status: "cancelled",
+          speed: "",
+          progress: 0,
+        })
+      );
       await invoke("cancel_anime", { title });
-    } catch {
-      await refresh();
-    }
-  };
+    });
 
-  const remove = async (id: string) => {
-    setDownloads((prev) => prev.filter((d) => d.id !== id));
-    try {
+  const remove = (id: string) =>
+    withOptimistic(async () => {
+      setDownloads((prev) => prev.filter((d) => d.id !== id));
       await invoke("delete_download", { id });
-    } catch {
-      await refresh();
-    }
-  };
+    });
 
-  const retry = async (id: string) => {
-    setDownloads((prev) =>
-      patchDownload(prev, id, {
-        status: "queued",
-        speed: "",
-        progress: 0,
-        error: undefined,
-      })
-    );
-    try {
+  const retry = (id: string) =>
+    withOptimistic(async () => {
+      setDownloads((prev) =>
+        patchDownload(prev, id, {
+          status: "queued",
+          speed: "",
+          progress: 0,
+          error: undefined,
+        })
+      );
       await invoke("retry_download", { id });
-    } catch {
-      await refresh();
-    }
-  };
+    });
 
   return {
     downloads,

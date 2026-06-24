@@ -323,6 +323,15 @@ impl DownloadManager {
         list
     }
 
+    /// Envia lista completa ao frontend (não depende de timers do WebView2).
+    pub async fn broadcast_snapshot(&self, app: &AppHandle) {
+        if !self.has_queue_work().await {
+            return;
+        }
+        let list = self.list().await;
+        let _ = app.emit("downloads-snapshot", list);
+    }
+
     async fn existing_poster_for_anime(&self, anime_title: &str) -> (Option<String>, Option<String>) {
         let items = self.items.lock().await;
         for item in items.values() {
