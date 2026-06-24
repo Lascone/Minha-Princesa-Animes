@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -23,13 +23,44 @@ function patchAnimeDownloads(
   );
 }
 
+/** Evita o WebView2 congelar timers/eventos ao perder foco (workaround Windows). */
+function useBackgroundKeepAlive() {
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const locks = navigator.locks;
+    if (!locks?.request) return;
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    locks
+      .request(
+        "minha-princesa-downloads",
+        { mode: "shared", signal: controller.signal },
+        () =>
+          new Promise<void>((resolve) => {
+            controller.signal.addEventListener("abort", () => resolve(), {
+              once: true,
+            });
+          })
+      )
+      .catch(() => undefined);
+
+    return () => controller.abort();
+  }, []);
+}
+
 export function useDownloads() {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
+  const visibleRef = useRef(true);
 
   const refresh = useCallback(async () => {
     const items = await invoke<DownloadItem[]>("get_downloads");
     setDownloads(items);
   }, []);
+
+  useBackgroundKeepAlive();
 
   useEffect(() => {
     refresh();
@@ -47,16 +78,26 @@ export function useDownloads() {
       });
     });
 
-    const interval = setInterval(refresh, 10000);
+    const onVisibility = () => {
+      visibleRef.current = document.visibilityState === "visible";
+      if (visibleRef.current) refresh();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    const interval = setInterval(() => {
+      if (visibleRef.current) refresh();
+    }, 5000);
 
     const win = getCurrentWindow();
     const unlistenFocus = win.onFocusChanged(({ payload: focused }) => {
+      visibleRef.current = focused;
       if (focused) refresh();
     });
 
     return () => {
       clearTimeout(restoreTimer);
       clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibility);
       unlistenProgress.then((fn) => fn());
       unlistenFocus.then((fn) => fn());
     };

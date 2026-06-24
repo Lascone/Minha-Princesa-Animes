@@ -2,41 +2,59 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-static ACTIVE_DOWNLOADS: AtomicUsize = AtomicUsize::new(0);
+static BACKGROUND_REFS: AtomicUsize = AtomicUsize::new(0);
+static QUEUE_HELD: AtomicBool = AtomicBool::new(false);
 static KEEPALIVE_RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Keeps the system awake and reduces Windows background throttling while downloads run.
+/// Keeps the system awake while a single download job runs.
 pub struct WakeGuard;
 
 impl WakeGuard {
     pub fn acquire() -> Self {
-        let prev = ACTIVE_DOWNLOADS.fetch_add(1, Ordering::SeqCst);
-        if prev == 0 {
-            set_background_resistant(true);
-        }
+        retain_background();
         WakeGuard
     }
 }
 
 impl Drop for WakeGuard {
     fn drop(&mut self) {
-        let prev = ACTIVE_DOWNLOADS.fetch_sub(1, Ordering::SeqCst);
-        if prev == 1 {
-            set_background_resistant(false);
+        release_background();
+    }
+}
+
+/// Keep Windows from throttling while anything is queued or downloading.
+pub fn sync_queue_activity(active: bool) {
+    if active {
+        if !QUEUE_HELD.swap(true, Ordering::SeqCst) {
+            retain_background();
         }
+    } else if QUEUE_HELD.swap(false, Ordering::SeqCst) {
+        release_background();
+    }
+}
+
+fn retain_background() {
+    if BACKGROUND_REFS.fetch_add(1, Ordering::SeqCst) == 0 {
+        set_background_resistant(true);
+        start_keepalive();
+    }
+}
+
+fn release_background() {
+    if BACKGROUND_REFS.fetch_sub(1, Ordering::SeqCst) == 1 {
+        set_background_resistant(false);
     }
 }
 
 #[cfg(windows)]
 fn set_background_resistant(enable: bool) {
-    if enable {
-        set_execution_state(true);
-        set_power_throttling(false);
-        start_keepalive();
-    } else if ACTIVE_DOWNLOADS.load(Ordering::SeqCst) == 0 {
-        set_execution_state(false);
-        set_power_throttling(true);
-    }
+    set_execution_state(enable);
+    set_power_throttling(!enable);
+}
+
+#[cfg(not(windows))]
+fn set_background_resistant(enable: bool) {
+    let _ = enable;
 }
 
 #[cfg(windows)]
@@ -51,7 +69,7 @@ fn start_keepalive() {
     thread::spawn(|| {
         loop {
             thread::sleep(Duration::from_secs(45));
-            if ACTIVE_DOWNLOADS.load(Ordering::SeqCst) == 0 {
+            if BACKGROUND_REFS.load(Ordering::SeqCst) == 0 {
                 KEEPALIVE_RUNNING.store(false, Ordering::SeqCst);
                 break;
             }
@@ -61,9 +79,7 @@ fn start_keepalive() {
 }
 
 #[cfg(not(windows))]
-fn set_background_resistant(enable: bool) {
-    let _ = enable;
-}
+fn start_keepalive() {}
 
 #[cfg(windows)]
 fn set_execution_state(enable: bool) {

@@ -70,6 +70,25 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 prepare_ffmpeg_in_background(ffmpeg_handle).await;
             });
+
+            let maintenance_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    let state = maintenance_handle.state::<AppState>();
+                    state
+                        .downloads
+                        .maintain(maintenance_handle.clone())
+                        .await;
+                }
+            });
+
+            let boot_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let state = boot_handle.state::<AppState>();
+                state.downloads.maintain(boot_handle.clone()).await;
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -7,7 +7,7 @@ use crate::sources::shared::stream::{effective_stream_kind, needs_ffmpeg};
 use crate::sushi::client::USER_AGENT_STR;
 use reqwest::header::{HeaderMap, HeaderValue, ORIGIN, REFERER, USER_AGENT};
 use futures_util::StreamExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc as StdArc, Mutex};
@@ -20,6 +20,7 @@ use uuid::Uuid;
 const PROGRESS_EMIT_MIN_MS: u64 = 500;
 const PROGRESS_PERSIST_MIN_MS: u64 = 2000;
 const KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
+const STALE_DOWNLOADING_SECS: u64 = 900;
 const MP4_PROGRESS_CHUNK_BYTES: u64 = 512 * 1024;
 const MP4_STALL_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -68,6 +69,7 @@ pub struct DownloadManager {
     queue_notify: StdArc<Notify>,
     worker_running: StdArc<AtomicBool>,
     progress_throttle: StdArc<AsyncMutex<HashMap<String, ProgressThrottle>>>,
+    active_jobs: StdArc<AsyncMutex<HashSet<String>>>,
     cached_ffmpeg: StdArc<AsyncMutex<Option<String>>>,
     db: StdArc<Mutex<CacheDb>>,
 }
@@ -86,6 +88,7 @@ impl DownloadManager {
             queue_notify: StdArc::new(Notify::new()),
             worker_running: StdArc::new(AtomicBool::new(false)),
             progress_throttle: StdArc::new(AsyncMutex::new(HashMap::new())),
+            active_jobs: StdArc::new(AsyncMutex::new(HashSet::new())),
             cached_ffmpeg: StdArc::new(AsyncMutex::new(None)),
             db,
         }
@@ -150,9 +153,91 @@ impl DownloadManager {
     }
 
     async fn cleanup_job_state(&self, id: &str) {
+        self.active_jobs.lock().await.remove(id);
         self.progress_throttle.lock().await.remove(id);
         self.stop_flags.lock().await.remove(id);
         self.child_slots.lock().await.remove(id);
+    }
+
+    async fn has_queue_work(&self) -> bool {
+        let items = self.items.lock().await;
+        items.values().any(|i| {
+            matches!(
+                i.status,
+                DownloadStatus::Queued | DownloadStatus::Downloading
+            )
+        })
+    }
+
+    async fn reset_job_controls(&self, id: &str) {
+        self.cleanup_job_state(id).await;
+    }
+
+    async fn is_paused_or_cancelled(&self, id: &str) -> (bool, bool) {
+        let pauses = self.pause_flags.lock().await;
+        let cancels = self.cancel_flags.lock().await;
+        (
+            pauses.get(id).copied().unwrap_or(false),
+            cancels.get(id).copied().unwrap_or(false),
+        )
+    }
+
+    /// Recupera apenas downloads realmente abandonados (sem task ativa há muito tempo).
+    pub async fn maintain(&self, app: AppHandle) {
+        let has_work = self.has_queue_work().await;
+        wakelock::sync_queue_activity(has_work);
+
+        let now = unix_now();
+        let active = self.active_jobs.lock().await.clone();
+        let downloading: Vec<(String, u64)> = {
+            let items = self.items.lock().await;
+            items
+                .values()
+                .filter(|i| i.status == DownloadStatus::Downloading)
+                .map(|i| (i.id.clone(), i.updated_at))
+                .collect()
+        };
+
+        let stale_ids: Vec<String> = downloading
+            .into_iter()
+            .filter(|(id, updated_at)| {
+                !active.contains(id) && now.saturating_sub(*updated_at) >= STALE_DOWNLOADING_SECS
+            })
+            .map(|(id, _)| id)
+            .collect();
+
+        for id in stale_ids {
+            self.spawn_kill_active(&id);
+            let (paused, cancelled) = self.is_paused_or_cancelled(&id).await;
+            self.reset_job_controls(&id).await;
+
+            if cancelled {
+                self.update_item(&app, &id, |item| {
+                    item.status = DownloadStatus::Cancelled;
+                    item.speed = String::new();
+                })
+                .await;
+            } else if paused {
+                self.update_item(&app, &id, |item| {
+                    item.status = DownloadStatus::Paused;
+                    item.progress = 0.0;
+                    item.speed = String::new();
+                })
+                .await;
+            } else {
+                self.update_item(&app, &id, |item| {
+                    item.status = DownloadStatus::Queued;
+                    item.progress = 0.0;
+                    item.speed = String::new();
+                    item.error = None;
+                })
+                .await;
+            }
+        }
+
+        if self.has_runnable_jobs().await {
+            self.ensure_worker(app);
+        }
     }
 
     async fn restore_stopped_state(
@@ -183,6 +268,13 @@ impl DownloadManager {
         } else if cancelled {
             self.update_item(app, id, |item| {
                 item.status = DownloadStatus::Cancelled;
+                item.speed = String::new();
+            })
+            .await;
+        } else {
+            self.update_item(app, id, |item| {
+                item.status = DownloadStatus::Queued;
+                item.progress = 0.0;
                 item.speed = String::new();
             })
             .await;
@@ -340,18 +432,22 @@ impl DownloadManager {
     }
 
     fn ensure_worker(&self, app: AppHandle) {
+        self.queue_notify.notify_waiters();
+
         if self
             .worker_running
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            self.queue_notify.notify_one();
+            self.queue_notify.notify_waiters();
             return;
         }
 
         let mgr = self.clone_inner();
         tokio::spawn(async move {
             mgr.worker_loop(app).await;
+            mgr.worker_running.store(false, Ordering::SeqCst);
+            mgr.queue_notify.notify_waiters();
         });
     }
 
@@ -375,7 +471,7 @@ impl DownloadManager {
                     mgr.run_download(app_clone, id, anime_title, episode, settings)
                         .await;
                     drop(permit);
-                    mgr.queue_notify.notify_one();
+                    mgr.queue_notify.notify_waiters();
                 });
             }
 
@@ -383,7 +479,6 @@ impl DownloadManager {
                 self.worker_running.store(false, Ordering::SeqCst);
                 self.queue_notify.notified().await;
                 if !self.has_runnable_jobs().await {
-                    self.worker_running.store(false, Ordering::SeqCst);
                     break;
                 }
                 if self
@@ -523,7 +618,7 @@ impl DownloadManager {
         let _ = app.emit("download-progress", &item);
         self.persist_item_bg(&item);
         self.spawn_kill_active(id);
-        self.queue_notify.notify_one();
+        self.queue_notify.notify_waiters();
         Ok(())
     }
 
@@ -553,7 +648,7 @@ impl DownloadManager {
         let _ = app.emit("download-progress", &item);
         self.persist_item_bg(&item);
         self.spawn_kill_active(id);
-        self.queue_notify.notify_one();
+        self.queue_notify.notify_waiters();
         Ok(())
     }
 
@@ -576,6 +671,8 @@ impl DownloadManager {
             item.updated_at = unix_now();
             item.clone()
         };
+
+        self.reset_job_controls(id).await;
         self.persist_item_bg(&item);
         self.ensure_worker(app);
         Ok(())
@@ -691,6 +788,7 @@ impl DownloadManager {
         };
 
         self.persist_item_bg(&saved);
+        self.reset_job_controls(id).await;
         self.cancel_flags.lock().await.insert(id.to_string(), false);
         self.pause_flags.lock().await.insert(id.to_string(), false);
         self.ensure_worker(app);
@@ -709,6 +807,7 @@ impl DownloadManager {
             queue_notify: StdArc::clone(&self.queue_notify),
             worker_running: StdArc::clone(&self.worker_running),
             progress_throttle: StdArc::clone(&self.progress_throttle),
+            active_jobs: StdArc::clone(&self.active_jobs),
             cached_ffmpeg: StdArc::clone(&self.cached_ffmpeg),
             db: StdArc::clone(&self.db),
         }
@@ -896,18 +995,21 @@ impl DownloadManager {
             id: id.clone(),
         };
         let _wake = wakelock::WakeGuard::acquire();
-
-        if self.is_stopped(&id).await {
-            self.restore_stopped_state(&app, &id, None).await;
-            return;
-        }
+        self.active_jobs.lock().await.insert(id.clone());
 
         let stop_flag = self.get_stop_flag(&id).await;
+        stop_flag.store(false, Ordering::Relaxed);
+
+        let (paused, cancelled) = self.is_paused_or_cancelled(&id).await;
+        if paused || cancelled {
+            self.restore_stopped_state(&app, &id, None).await;
+            return;
+        }
+
         if self.is_stopped(&id).await {
             self.restore_stopped_state(&app, &id, None).await;
             return;
         }
-        stop_flag.store(false, Ordering::Relaxed);
 
         self.update_item(&app, &id, |item| {
             if matches!(
