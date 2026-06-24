@@ -79,6 +79,33 @@ function Get-SigningKeyPath {
     return $null
 }
 
+function Get-SigningKeyRawContent {
+  param(
+    [Parameter(Mandatory)][string]$KeyPath
+  )
+
+  $raw = (Get-Content -Path $KeyPath -Raw).Trim()
+  if ([string]::IsNullOrWhiteSpace($raw)) {
+    throw "Arquivo de chave vazio: $KeyPath"
+  }
+
+  if ($raw.StartsWith("untrusted comment:")) {
+    return $raw
+  }
+
+  try {
+    $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($raw))
+    if ($decoded.StartsWith("untrusted comment:")) {
+      Write-Host "    Chave em base64 detectada; usando conteudo decodificado para o Tauri" -ForegroundColor DarkGray
+      return $decoded.Trim()
+    }
+  } catch {
+    # nao e base64; segue com o conteudo original
+  }
+
+  return $raw
+}
+
 function Set-TauriSigningEnv {
   param(
     [string]$Password = ""
@@ -90,11 +117,7 @@ function Set-TauriSigningEnv {
     return $false
   }
 
-  $keyContent = (Get-Content -Path $keyPath -Raw).Trim()
-  if ([string]::IsNullOrWhiteSpace($keyContent)) {
-    throw "Arquivo de chave vazio: $keyPath"
-  }
-
+  $keyContent = Get-SigningKeyRawContent -KeyPath $keyPath
   $env:TAURI_SIGNING_PRIVATE_KEY = $keyContent
   $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $Password
   Write-Ok "TAURI_SIGNING_PRIVATE_KEY carregada ($keyPath)"
@@ -131,7 +154,7 @@ Depois rode: .\preparar.ps1 -PublishSecrets
   Write-Host "    Nome obrigatorio: TAURI_SIGNING_PRIVATE_KEY" -ForegroundColor DarkGray
   Write-Host "    (NAO use outro nome, ex: MINHAPRINCESAANIMES)" -ForegroundColor DarkGray
 
-  $keyContent = (Get-Content -Path $keyPath -Raw).Trim()
+  $keyContent = Get-SigningKeyRawContent -KeyPath $keyPath
   $keyContent | gh secret set TAURI_SIGNING_PRIVATE_KEY
   if ($LASTEXITCODE -ne 0) {
     throw "gh secret set TAURI_SIGNING_PRIVATE_KEY falhou. Rode antes: gh auth login"
