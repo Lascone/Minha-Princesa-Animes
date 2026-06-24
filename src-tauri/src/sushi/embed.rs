@@ -101,14 +101,21 @@ fn is_junk_media_url(lower: &str) -> bool {
 
 fn stream_priority(url: &str) -> u8 {
     let lower = url.to_lowercase();
-    if lower.contains(".m3u8") {
+    let is_hls = lower.contains(".m3u8")
+        || lower.contains("videohls")
+        || (lower.contains(".txt") && (lower.contains("playlist") || lower.contains("/hls")));
+    let is_direct_mp4 = lower.contains(".mp4") && !is_hls && !lower.contains("/index.");
+
+    if is_direct_mp4 {
         0
-    } else if lower.contains(".txt") {
+    } else if lower.contains(".m3u8") {
         1
-    } else if lower.contains(".mp4") {
+    } else if lower.contains(".txt") {
         2
-    } else if lower.contains(".ts") {
+    } else if lower.contains(".mp4") {
         3
+    } else if lower.contains(".ts") {
+        4
     } else {
         99
     }
@@ -148,14 +155,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prefers_m3u8_over_mp4() {
+    fn prefers_direct_mp4_over_m3u8() {
         let html = r#"
             file: "https://cdn.example.com/video.mp4"
             <source src="https://cdn.example.com/master.m3u8">
         "#;
         let info = parse_stream_from_embed(html).unwrap();
-        assert!(info.url.contains(".m3u8"));
-        assert_eq!(info.kind, StreamKind::Hls);
+        assert!(info.url.contains(".mp4"));
+        assert_eq!(info.kind, StreamKind::Mp4);
     }
 
     #[test]

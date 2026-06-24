@@ -108,16 +108,50 @@ fn is_junk_media_url(lower: &str) -> bool {
         || lower.contains("google-analytics")
 }
 
-fn stream_priority(url: &str) -> u8 {
+pub fn is_hls_manifest_url(url: &str) -> bool {
     let lower = url.to_lowercase();
-    if lower.contains(".m3u8") {
+    lower.contains(".m3u8")
+        || lower.contains("videohls")
+        || lower.contains("mpegurl")
+        || (lower.contains(".txt") && (lower.contains("playlist") || lower.contains("/hls")))
+}
+
+pub fn is_direct_mp4_url(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    if is_hls_manifest_url(url) {
+        return false;
+    }
+    lower.contains(".mp4") && !lower.contains("/index.")
+}
+
+pub fn needs_ffmpeg(url: &str, kind: StreamKind) -> bool {
+    match effective_stream_kind(url, kind) {
+        StreamKind::Hls => true,
+        StreamKind::Mp4 => false,
+    }
+}
+
+pub fn effective_stream_kind(url: &str, kind: StreamKind) -> StreamKind {
+    if is_direct_mp4_url(url) {
+        return StreamKind::Mp4;
+    }
+    if is_hls_manifest_url(url) {
+        return StreamKind::Hls;
+    }
+    kind
+}
+
+fn stream_priority(url: &str) -> u8 {
+    if is_direct_mp4_url(url) {
         0
-    } else if lower.contains(".txt") {
+    } else if url.to_lowercase().contains(".m3u8") {
         1
-    } else if lower.contains(".mp4") {
+    } else if url.to_lowercase().contains(".txt") {
         2
-    } else if lower.contains(".ts") {
+    } else if url.to_lowercase().contains(".mp4") {
         3
+    } else if url.to_lowercase().contains(".ts") {
+        4
     } else {
         99
     }
@@ -179,14 +213,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prefers_m3u8_over_mp4() {
+    fn prefers_direct_mp4_over_m3u8() {
         let html = r#"
             file: "https://cdn.example.com/video.mp4"
             <source src="https://cdn.example.com/master.m3u8">
         "#;
         let info = parse_stream_from_html(html).unwrap();
-        assert!(info.url.contains(".m3u8"));
-        assert_eq!(info.kind, StreamKind::Hls);
+        assert!(info.url.contains(".mp4"));
+        assert_eq!(info.kind, StreamKind::Mp4);
+    }
+
+    #[test]
+    fn hls_manifest_with_mp4_in_path_stays_hls() {
+        let url = "https://cdn.example.com/stream/ep/12.mp4/index.m3u8";
+        assert!(is_hls_manifest_url(url));
+        assert!(!is_direct_mp4_url(url));
+        assert_eq!(
+            effective_stream_kind(url, StreamKind::Hls),
+            StreamKind::Hls
+        );
     }
 
     #[test]

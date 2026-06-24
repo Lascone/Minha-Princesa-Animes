@@ -32,27 +32,8 @@ fn persist_resolved_ffmpeg(app: &tauri::AppHandle) {
 }
 
 async fn prepare_ffmpeg_in_background(app: tauri::AppHandle) {
+    // Só registra FFmpeg já instalado no PATH; download do bundle é lazy no primeiro HLS.
     persist_resolved_ffmpeg(&app);
-
-    let state = app.state::<AppState>();
-    let configured = state
-        .settings
-        .lock()
-        .map(|s| s.ffmpeg_path.clone())
-        .unwrap_or_default();
-
-    if resolve_ffmpeg_path(&configured).source != download::FfmpegSource::Missing {
-        return;
-    }
-
-    if let Ok(path) = download::ensure_ffmpeg_path(&configured).await {
-        if let Ok(mut settings) = state.settings.lock() {
-            settings.ffmpeg_path = path;
-            if let Ok(db) = state.db.lock() {
-                let _ = db.save_settings(&settings);
-            }
-        }
-    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

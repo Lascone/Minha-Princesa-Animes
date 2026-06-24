@@ -3,6 +3,7 @@ use crate::download::validate::{is_valid_episode_file, should_redownload};
 use crate::download::{build_output_path, ensure_ffmpeg_path, hls};
 use crate::models::{AppSettings, DownloadItem, DownloadRequest, DownloadStatus, EpisodeInfo};
 use crate::sources::{self, source_for_url, StreamKind};
+use crate::sources::shared::stream::{effective_stream_kind, needs_ffmpeg};
 use crate::sushi::client::USER_AGENT_STR;
 use reqwest::header::{HeaderMap, HeaderValue, ORIGIN, REFERER, USER_AGENT};
 use futures_util::StreamExt;
@@ -19,6 +20,7 @@ use uuid::Uuid;
 const PROGRESS_EMIT_MIN_MS: u64 = 500;
 const PROGRESS_PERSIST_MIN_MS: u64 = 1000;
 const MP4_PROGRESS_CHUNK_BYTES: u64 = 512 * 1024;
+const MP4_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 async fn fetch_stream_with_headers(
     url: &str,
@@ -754,7 +756,9 @@ impl DownloadManager {
         output: &PathBuf,
         stop_flag: StdArc<AtomicBool>,
     ) -> Result<(), String> {
-        let primary = match kind {
+        let effective = effective_stream_kind(url, kind);
+
+        let primary = match effective {
             StreamKind::Hls => {
                 self.download_hls(app, id, settings, url, referer, origin, output, stop_flag.clone())
                     .await
@@ -774,7 +778,12 @@ impl DownloadManager {
             return Err(primary_err);
         }
 
-        if kind == StreamKind::Mp4 {
+        let try_hls_fallback = effective == StreamKind::Mp4
+            && (primary_err.contains("playlist HLS")
+                || primary_err.contains("mpegurl")
+                || needs_ffmpeg(url, kind));
+
+        if try_hls_fallback {
             let ffmpeg_path = self.resolved_ffmpeg(settings).await?;
             if hls::ffmpeg_available(&ffmpeg_path) {
                 return self
@@ -852,7 +861,7 @@ impl DownloadManager {
                 let mgr = mgr.clone_inner();
                 let app = app.clone();
                 let id_owned = id_owned.clone();
-                let gate = StdArc::new(std::sync::Mutex::new((Instant::now(), 0.0f64)));
+                let gate = StdArc::new(std::sync::Mutex::new((Instant::now(), 0.0f64, 0u64)));
                 move |event| match event {
                     hls::HlsEvent::Connecting(secs) => {
                         let mgr = mgr.clone_inner();
@@ -862,6 +871,41 @@ impl DownloadManager {
                             mgr.update_item(&app, &id, |item| {
                                 item.speed =
                                     format!("Conectando ao stream... ({secs}s)");
+                            })
+                            .await;
+                        });
+                    }
+                    hls::HlsEvent::StallWarning(secs) => {
+                        let mgr = mgr.clone_inner();
+                        let app = app.clone();
+                        let id = id_owned.clone();
+                        tauri::async_runtime::spawn(async move {
+                            mgr.update_item(&app, &id, |item| {
+                                item.speed = format!("Sem progresso há {secs}s…");
+                            })
+                            .await;
+                        });
+                    }
+                    hls::HlsEvent::BytesTransferred(bytes) => {
+                        let mut g = gate.lock().unwrap_or_else(|e| e.into_inner());
+                        let now = Instant::now();
+                        let mb = bytes as f64 / 1_048_576.0;
+                        let speed = if g.2 > 0 {
+                            let delta = bytes.saturating_sub(g.2) as f64 / 1_048_576.0;
+                            let secs = now.duration_since(g.0).as_secs_f64().max(0.1);
+                            format!("{:.1} MB/s ({mb:.0} MB)", delta / secs)
+                        } else {
+                            format!("{mb:.0} MB baixados")
+                        };
+                        g.0 = now;
+                        g.2 = bytes;
+                        drop(g);
+                        let mgr = mgr.clone_inner();
+                        let app = app.clone();
+                        let id = id_owned.clone();
+                        tauri::async_runtime::spawn(async move {
+                            mgr.update_item(&app, &id, |item| {
+                                item.speed = speed;
                             })
                             .await;
                         });
@@ -942,10 +986,12 @@ impl DownloadManager {
         use tokio::io::AsyncWriteExt;
 
         let started = Instant::now();
-        let mut last_progress_at = Instant::now();
         let mut last_reported_bytes: u64 = 0;
+        let mut last_emit = Instant::now();
 
-        while let Some(chunk) = stream.next().await {
+        use tokio::time::timeout;
+
+        loop {
             if stop_flag.load(Ordering::Relaxed) || self.is_stopped(id).await {
                 let _ = tokio::fs::remove_file(output).await;
                 if self.pause_flags.lock().await.get(id).copied().unwrap_or(false) {
@@ -953,16 +999,30 @@ impl DownloadManager {
                 }
                 return Err("Cancelado".to_string());
             }
-            let chunk = chunk.map_err(|e| e.to_string())?;
+
+            let chunk_result = timeout(MP4_STALL_TIMEOUT, stream.next()).await;
+            let chunk = match chunk_result {
+                Ok(Some(Ok(bytes))) => bytes,
+                Ok(Some(Err(e))) => return Err(e.to_string()),
+                Ok(None) => break,
+                Err(_) => {
+                    let _ = tokio::fs::remove_file(output).await;
+                    return Err(format!(
+                        "Download travado (sem progresso há {}s)",
+                        MP4_STALL_TIMEOUT.as_secs()
+                    ));
+                }
+            };
+
             file.write_all(&chunk).await.map_err(|e| e.to_string())?;
             downloaded += chunk.len() as u64;
 
             let should_update = downloaded.saturating_sub(last_reported_bytes) >= MP4_PROGRESS_CHUNK_BYTES
-                || last_progress_at.elapsed().as_millis() >= PROGRESS_EMIT_MIN_MS as u128;
+                || last_emit.elapsed().as_millis() >= PROGRESS_EMIT_MIN_MS as u128;
 
             if should_update {
                 last_reported_bytes = downloaded;
-                last_progress_at = Instant::now();
+                last_emit = Instant::now();
 
                 let progress = if total > 0 {
                     (downloaded as f64 / total as f64) * 100.0
@@ -1011,6 +1071,7 @@ mod integration_tests {
     use super::*;
     use crate::download::hls;
     use crate::models::AnimeSourceId;
+    use crate::sources::shared::stream::effective_stream_kind;
     use crate::sources::{self, StreamKind};
 
     async fn download_test_episode(episode_url: &str, output_name: &str, min_bytes: u64) {
@@ -1031,7 +1092,8 @@ mod integration_tests {
         let _ = std::fs::remove_file(&output);
 
         let dl_start = Instant::now();
-        match stream.kind {
+        let effective = effective_stream_kind(&stream.url, stream.kind);
+        match effective {
             StreamKind::Hls => {
                 let resolved = resolve_ffmpeg_path("ffmpeg");
                 assert_ne!(
@@ -1052,6 +1114,8 @@ mod integration_tests {
                     slot,
                     |event| match event {
                         hls::HlsEvent::Connecting(secs) => eprintln!("connecting {secs}s"),
+                        hls::HlsEvent::StallWarning(secs) => eprintln!("stall warning {secs}s"),
+                        hls::HlsEvent::BytesTransferred(b) => eprintln!("bytes {b}"),
                         hls::HlsEvent::Progress(p) => eprintln!("progress {:.0}%", p),
                     },
                 )

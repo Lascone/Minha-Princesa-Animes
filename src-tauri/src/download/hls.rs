@@ -16,13 +16,19 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
 const LINE_READ_TIMEOUT: Duration = Duration::from_millis(500);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+const STALL_WARN_AFTER: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Copy)]
 pub enum HlsEvent {
-    /// Atualiza só o texto de status (progresso permanece 0%).
+    /// Atualiza só o texto de status (progresso permanece baixo).
     Connecting(u64),
     /// Progresso real do FFmpeg (3–95%).
     Progress(f64),
+    /// Aviso antes de abortar: sem bytes nem time= há N segundos.
+    StallWarning(u64),
+    /// Arquivo crescendo mas FFmpeg ainda não reportou time=.
+    BytesTransferred(u64),
 }
 
 #[derive(Error, Debug)]
@@ -151,10 +157,12 @@ pub async fn download_hls(
     let mut reader = BufReader::new(stderr).lines();
     let mut exit_status = None;
     let started = Instant::now();
-    let mut last_progress_at = Instant::now();
+    let mut last_activity = Instant::now();
     let mut stderr_tail = String::new();
     let mut duration_secs: Option<f64> = None;
     let mut stream_started = false;
+    let mut last_file_bytes: u64 = 0;
+    let mut last_progress_pct: f64 = 0.0;
     let mut heartbeat = interval(HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -173,29 +181,52 @@ pub async fn download_hls(
         }
 
         tokio::select! {
-            _ = heartbeat.tick(), if !stream_started => {
-                on_event(HlsEvent::Connecting(started.elapsed().as_secs()));
+            _ = heartbeat.tick() => {
+                let file_bytes = output_file_bytes(output_path);
+                if file_bytes > last_file_bytes {
+                    last_file_bytes = file_bytes;
+                    last_activity = Instant::now();
+                    if stream_started {
+                        on_event(HlsEvent::BytesTransferred(file_bytes));
+                    }
+                }
+
+                if !stream_started {
+                    on_event(HlsEvent::Connecting(started.elapsed().as_secs()));
+                } else {
+                    let stalled = last_activity.elapsed();
+                    if stalled >= STALL_WARN_AFTER && stalled < STALL_TIMEOUT {
+                        on_event(HlsEvent::StallWarning(stalled.as_secs()));
+                    }
+                    if stalled >= STALL_TIMEOUT {
+                        kill_child(&child_slot).await;
+                        return Err(HlsError::Failed(format!(
+                            "Download travado (sem progresso há {}s). Última saída: {}",
+                            STALL_TIMEOUT.as_secs(),
+                            tail_lines(&stderr_tail, 3)
+                        )));
+                    }
+                }
             }
             line_result = timeout(LINE_READ_TIMEOUT, reader.next_line()) => {
                 match line_result {
                     Ok(Ok(Some(line))) => {
                         append_stderr_tail(&mut stderr_tail, &line);
+                        last_activity = Instant::now();
                         if is_ffmpeg_fatal(&line) {
                             kill_child(&child_slot).await;
                             return Err(HlsError::Failed(line));
                         }
                         if let Some(d) = parse_ffmpeg_duration(&line) {
                             duration_secs = Some(d);
-                            last_progress_at = Instant::now();
                             stream_started = true;
                         }
                         if line.contains("time=") {
-                            last_progress_at = Instant::now();
                             stream_started = true;
-                            on_event(HlsEvent::Progress(parse_ffmpeg_time(
-                                &line,
-                                duration_secs,
-                            )));
+                            if let Some(progress) = parse_ffmpeg_time(&line, duration_secs) {
+                                last_progress_pct = progress;
+                                on_event(HlsEvent::Progress(progress));
+                            }
                         }
                     }
                     Ok(Ok(None)) => break,
@@ -204,10 +235,19 @@ pub async fn download_hls(
                         return Err(HlsError::Io(e));
                     }
                     Err(_) => {
-                        if last_progress_at.elapsed() > CONNECT_TIMEOUT && !stream_started {
+                        if last_activity.elapsed() > CONNECT_TIMEOUT && !stream_started {
                             kill_child(&child_slot).await;
                             return Err(HlsError::Failed(format!(
                                 "Sem resposta do FFmpeg (90s). Última saída: {}",
+                                tail_lines(&stderr_tail, 3)
+                            )));
+                        }
+                        if stream_started && last_activity.elapsed() >= STALL_TIMEOUT {
+                            kill_child(&child_slot).await;
+                            return Err(HlsError::Failed(format!(
+                                "Download travado (sem progresso há {}s, {:.0}%). Última saída: {}",
+                                STALL_TIMEOUT.as_secs(),
+                                last_progress_pct,
                                 tail_lines(&stderr_tail, 3)
                             )));
                         }
@@ -258,6 +298,10 @@ pub async fn download_hls(
             tail_lines(&stderr_tail, 3)
         ))),
     }
+}
+
+fn output_file_bytes(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
 fn is_ffmpeg_fatal(line: &str) -> bool {
@@ -316,16 +360,13 @@ fn parse_ffmpeg_duration(line: &str) -> Option<f64> {
     parse_hms_timestamp(rest[..end].trim())
 }
 
-fn parse_ffmpeg_time(line: &str, duration_secs: Option<f64>) -> f64 {
-    if let Some(idx) = line.find("time=") {
-        let time_str = &line[idx + 5..];
-        let end = time_str.find(' ').unwrap_or(time_str.len());
-        if let Some(total_secs) = parse_hms_timestamp(&time_str[..end]) {
-            let episode_len = duration_secs.unwrap_or(1440.0).max(1.0);
-            return (total_secs / episode_len * 100.0).min(95.0);
-        }
-    }
-    3.0
+fn parse_ffmpeg_time(line: &str, duration_secs: Option<f64>) -> Option<f64> {
+    let idx = line.find("time=")?;
+    let time_str = &line[idx + 5..];
+    let end = time_str.find(' ').unwrap_or(time_str.len());
+    let total_secs = parse_hms_timestamp(time_str[..end].trim())?;
+    let episode_len = duration_secs.unwrap_or(1440.0).max(1.0);
+    Some((total_secs / episode_len * 100.0).min(95.0))
 }
 
 pub fn ffmpeg_available(path: &str) -> bool {
@@ -344,4 +385,21 @@ pub fn ffmpeg_available(path: &str) -> bool {
     cmd.status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_time_returns_none_without_timestamp() {
+        assert!(parse_ffmpeg_time("frame=  100 fps= 25", None).is_none());
+    }
+
+    #[test]
+    fn parse_time_computes_percent() {
+        let line = "size=    1024kB time=00:06:00.00 bitrate= 500.0kbits/s";
+        let pct = parse_ffmpeg_time(line, Some(1200.0)).unwrap();
+        assert!((pct - 30.0).abs() < 0.5);
+    }
 }
