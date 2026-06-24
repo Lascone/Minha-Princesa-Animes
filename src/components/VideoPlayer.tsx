@@ -1,10 +1,12 @@
+import { Component, type ErrorInfo, type ReactNode } from "react";
 import type { DownloadItem } from "../types";
-import { Video } from "@videojs/react/video";
+import { Video, VideoSkin } from "@videojs/react/video";
+import "@videojs/react/video/skin.css";
+import "../player/PrincesaVideoSkin.css";
 import { Icon } from "./Icon";
 import { PlayerOverlay } from "./PlayerOverlay";
 import { PlayerUpNext } from "./PlayerUpNext";
 import { PrincesaPlayer } from "../player/createPrincesaPlayer";
-import { PrincesaVideoSkin } from "../player/PrincesaVideoSkin";
 import { usePrincesaPlayback } from "../player/usePrincesaPlayback";
 
 interface VideoPlayerProps {
@@ -12,6 +14,50 @@ interface VideoPlayerProps {
   nextEpisode?: DownloadItem | null;
   onNextEpisode?: (item: DownloadItem) => void;
   onClose: () => void;
+}
+
+interface PlayerErrorBoundaryProps {
+  children: ReactNode;
+  onClose: () => void;
+}
+
+interface PlayerErrorBoundaryState {
+  error: string | null;
+}
+
+class PlayerErrorBoundary extends Component<
+  PlayerErrorBoundaryProps,
+  PlayerErrorBoundaryState
+> {
+  state: PlayerErrorBoundaryState = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error: error.message || "Erro no player" };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("VideoPlayer crash:", error, info);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="video-player-panel video-player-panel--error">
+          <div className="video-player-error">
+            <Icon name="fa-circle-exclamation" /> {this.state.error}
+          </div>
+          <button
+            type="button"
+            className="btn-ghost btn-sm"
+            onClick={this.props.onClose}
+          >
+            <Icon name="fa-xmark" /> Fechar
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function VideoPlayerInner({
@@ -24,7 +70,6 @@ function VideoPlayerInner({
     src,
     error,
     isLoading,
-    mediaReady,
     resumeHint,
     showResumeChoice,
     pendingResumeTime,
@@ -50,13 +95,11 @@ function VideoPlayerInner({
     );
   }
 
-  const showLoading = isLoading || !src || !mediaReady;
-
   return (
     <div className="video-player-panel video-player-panel--cinema">
       <div className="video-player-cinema-frame">
         <div className="video-player-aspect">
-          {showLoading && (
+          {isLoading && (
             <div className="video-player-loading" aria-hidden="true">
               <div className="video-player-loading-glow" />
               <Icon name="fa-spinner" spin />
@@ -86,14 +129,14 @@ function VideoPlayerInner({
           )}
 
           {src ? (
-            <PrincesaVideoSkin className="player-princesa-skin">
+            <VideoSkin className="media-princesa-skin player-princesa-skin">
               <Video
                 src={src}
                 className="video-player"
                 playsInline
                 preload="auto"
               />
-            </PrincesaVideoSkin>
+            </VideoSkin>
           ) : null}
         </div>
       </div>
@@ -116,8 +159,10 @@ export function VideoPlayer(props: VideoPlayerProps) {
   }
 
   return (
-    <PrincesaPlayer.Provider>
-      <VideoPlayerInner {...props} />
-    </PrincesaPlayer.Provider>
+    <PlayerErrorBoundary onClose={props.onClose}>
+      <PrincesaPlayer.Provider>
+        <VideoPlayerInner {...props} />
+      </PrincesaPlayer.Provider>
+    </PlayerErrorBoundary>
   );
 }

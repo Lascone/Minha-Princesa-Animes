@@ -1,6 +1,6 @@
 [package]
 name = "minha-princesa-animes"
-version = "0.6.1"
+version = "0.6.2"
 description = "Minha Princesa Animes - biblioteca e downloader de animes"
 authors = ["Lascone"]
 edition = "2021"

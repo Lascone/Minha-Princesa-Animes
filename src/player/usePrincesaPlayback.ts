@@ -1,12 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import {
-  selectError,
-  selectPlayback,
-  selectPlaybackRate,
-  selectTime,
-  selectVolume,
-} from "@videojs/react";
 import type { DownloadItem } from "../types";
 import {
   clearWatchProgress,
@@ -41,14 +34,7 @@ export function usePrincesaPlayback({
   nextEpisode,
   onNextEpisode,
 }: UsePrincesaPlaybackOptions) {
-  const store = PrincesaPlayer.usePlayer();
-  const media = PrincesaPlayer.useMedia();
-  const time = PrincesaPlayer.usePlayer(selectTime);
-  const playback = PrincesaPlayer.usePlayer(selectPlayback);
-  const volume = PrincesaPlayer.usePlayer(selectVolume);
-  const playbackRate = PrincesaPlayer.usePlayer(selectPlaybackRate);
-  const playerError = PrincesaPlayer.usePlayer(selectError);
-  const canPlay = PrincesaPlayer.usePlayer((s) => s.canPlay);
+  const videoEl = PrincesaPlayer.useMedia() as HTMLVideoElement | null;
 
   const mountedRef = useRef(true);
   const saveTimerRef = useRef<number | null>(null);
@@ -62,8 +48,6 @@ export function usePrincesaPlayback({
   const itemRef = useRef(item);
   const loadTokenRef = useRef(0);
   const prefsAppliedRef = useRef(false);
-  const prevSeekingRef = useRef(false);
-  const prevPausedRef = useRef(true);
 
   const nextEpisodeRef = useRef(nextEpisode);
   const onNextEpisodeRef = useRef(onNextEpisode);
@@ -129,21 +113,30 @@ export function usePrincesaPlayback({
     safeSet(setShowUpNext, false);
   }, [safeSet]);
 
+  const playVideo = useCallback((video: HTMLVideoElement) => {
+    const promise = video.play();
+    if (promise !== undefined) {
+      promise.catch(() => undefined);
+    }
+  }, []);
+
   const startFromBeginning = useCallback(() => {
     dismissResumeForSession(progressKey);
     userSeekedRef.current = true;
     safeSet(setShowResumeChoice, false);
     safeSet(setResumeHint, null);
-    void store.seek(0);
-    void store.play().catch(() => undefined);
-  }, [progressKey, safeSet, store]);
+    if (videoEl) {
+      videoEl.currentTime = 0;
+      playVideo(videoEl);
+    }
+  }, [playVideo, progressKey, safeSet, videoEl]);
 
   const applyResume = useCallback(() => {
-    if (pendingResumeTime <= 0) {
+    if (pendingResumeTime <= 0 || !videoEl) {
       safeSet(setShowResumeChoice, false);
       return;
     }
-    void store.seek(pendingResumeTime);
+    videoEl.currentTime = pendingResumeTime;
     safeSet(
       setResumeHint,
       `Continuando de ${formatPlaybackTime(pendingResumeTime)}`
@@ -151,8 +144,8 @@ export function usePrincesaPlayback({
     safeSet(setShowResumeChoice, false);
     resumeAppliedRef.current = true;
     window.setTimeout(() => safeSet(setResumeHint, null), 4000);
-    void store.play().catch(() => undefined);
-  }, [pendingResumeTime, safeSet, store]);
+    playVideo(videoEl);
+  }, [pendingResumeTime, playVideo, safeSet, videoEl]);
 
   const scheduleSave = useCallback((current: number, duration: number) => {
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
@@ -222,6 +215,8 @@ export function usePrincesaPlayback({
     clearLoadTimeout();
     safeSet(setIsLoading, false);
 
+    if (!videoEl) return;
+
     if (
       pending.savedPosition &&
       pending.savedPosition > 0 &&
@@ -231,9 +226,9 @@ export function usePrincesaPlayback({
       safeSet(setPendingResumeTime, pending.savedPosition);
       safeSet(setShowResumeChoice, true);
     } else {
-      void store.play().catch(() => undefined);
+      playVideo(videoEl);
     }
-  }, [clearLoadTimeout, safeSet, store]);
+  }, [clearLoadTimeout, playVideo, safeSet, videoEl]);
 
   const beginEpisode = useCallback(
     (episodeItem: DownloadItem) => {
@@ -253,7 +248,7 @@ export function usePrincesaPlayback({
 
       loadTimeoutRef.current = window.setTimeout(() => {
         if (token !== loadTokenRef.current || !mountedRef.current) return;
-        const duration = time?.duration ?? 0;
+        const duration = videoEl?.duration ?? 0;
         if (duration > 0) {
           finishPendingLoad();
           return;
@@ -266,7 +261,7 @@ export function usePrincesaPlayback({
         safeSet(setIsLoading, false);
       }, 15000);
     },
-    [clearLoadTimeout, finishPendingLoad, resetEpisodeUi, safeSet, time?.duration]
+    [clearLoadTimeout, finishPendingLoad, resetEpisodeUi, safeSet, videoEl]
   );
 
   useEffect(() => {
@@ -276,23 +271,23 @@ export function usePrincesaPlayback({
       if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
       clearLoadTimeout();
       cancelAutoNext();
-      if (time) {
+      if (videoEl) {
         saveWatchProgress(
           itemRef.current,
-          time.currentTime,
-          time.duration
+          videoEl.currentTime,
+          videoEl.duration
         );
       }
     };
-  }, [cancelAutoNext, clearLoadTimeout, time]);
+  }, [cancelAutoNext, clearLoadTimeout, videoEl]);
 
   useEffect(() => {
-    if (!media || prefsAppliedRef.current) return;
+    if (!videoEl || prefsAppliedRef.current) return;
     const prefs = loadPlayerPrefs();
-    store.setVolume(prefs.volume);
-    playbackRate?.setPlaybackRate(prefs.speed);
+    videoEl.volume = prefs.volume;
+    videoEl.playbackRate = prefs.speed;
     prefsAppliedRef.current = true;
-  }, [media, playbackRate, store]);
+  }, [videoEl]);
 
   useEffect(() => {
     if (!item.outputPath) {
@@ -317,59 +312,91 @@ export function usePrincesaPlayback({
   }, [item.id, item.outputPath, beginEpisode, safeSet]);
 
   useEffect(() => {
-    if (!media || !src || !pendingLoadRef.current) return;
-    if (canPlay) {
-      finishPendingLoad();
-    }
-  }, [canPlay, finishPendingLoad, media, src]);
+    const video = videoEl;
+    if (!video || !src) return;
 
-  useEffect(() => {
-    if (!time) return;
-    scheduleSave(time.currentTime, time.duration);
-    updateProgressUi(time.currentTime, time.duration);
-  }, [time?.currentTime, time?.duration, scheduleSave, updateProgressUi, time]);
+    const onLoadedData = () => {
+      if (pendingLoadRef.current) {
+        finishPendingLoad();
+      } else {
+        safeSet(setIsLoading, false);
+      }
+    };
 
-  useEffect(() => {
-    if (!playback?.ended) return;
-    handleEnded();
-  }, [playback?.ended, handleEnded]);
+    const onCanPlay = () => {
+      if (pendingLoadRef.current) {
+        finishPendingLoad();
+      }
+    };
 
-  useEffect(() => {
-    const seeking = time?.seeking ?? false;
-    if (!seeking && prevSeekingRef.current) {
-      userSeekedRef.current = true;
-      safeSet(setShowResumeChoice, false);
-    }
-    prevSeekingRef.current = seeking;
-  }, [time?.seeking, safeSet]);
-
-  useEffect(() => {
-    const paused = playback?.paused ?? true;
-    if (paused && !prevPausedRef.current && time) {
-      saveWatchProgress(itemRef.current, time.currentTime, time.duration);
-    }
-    prevPausedRef.current = paused;
-  }, [playback?.paused, time]);
-
-  useEffect(() => {
-    if (volume) {
-      savePlayerPrefs({ volume: volume.muted ? 0 : volume.volume });
-    }
-  }, [volume?.volume, volume?.muted]);
-
-  useEffect(() => {
-    if (playbackRate) {
-      savePlayerPrefs({ speed: playbackRate.playbackRate });
-    }
-  }, [playbackRate?.playbackRate]);
-
-  useEffect(() => {
-    if (playerError?.error && isLoading) {
+    const onVideoError = () => {
+      pendingLoadRef.current = null;
+      clearLoadTimeout();
       safeSet(setError, "Não foi possível reproduzir este episódio");
       safeSet(setIsLoading, false);
-      pendingLoadRef.current = null;
+    };
+
+    const onTimeUpdate = () => {
+      scheduleSave(video.currentTime, video.duration);
+      updateProgressUi(video.currentTime, video.duration);
+    };
+
+    const onSeeked = () => {
+      userSeekedRef.current = true;
+      safeSet(setShowResumeChoice, false);
+    };
+
+    const onPause = () => {
+      saveWatchProgress(itemRef.current, video.currentTime, video.duration);
+    };
+
+    const onEnded = () => {
+      handleEnded();
+    };
+
+    const onVolumeChange = () => {
+      savePlayerPrefs({ volume: video.muted ? 0 : video.volume });
+    };
+
+    const onRateChange = () => {
+      savePlayerPrefs({ speed: video.playbackRate });
+    };
+
+    video.addEventListener("loadeddata", onLoadedData);
+    video.addEventListener("canplay", onCanPlay);
+    video.addEventListener("error", onVideoError);
+    video.addEventListener("timeupdate", onTimeUpdate);
+    video.addEventListener("seeked", onSeeked);
+    video.addEventListener("pause", onPause);
+    video.addEventListener("ended", onEnded);
+    video.addEventListener("volumechange", onVolumeChange);
+    video.addEventListener("ratechange", onRateChange);
+
+    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      onLoadedData();
     }
-  }, [playerError?.error, isLoading, safeSet]);
+
+    return () => {
+      video.removeEventListener("loadeddata", onLoadedData);
+      video.removeEventListener("canplay", onCanPlay);
+      video.removeEventListener("error", onVideoError);
+      video.removeEventListener("timeupdate", onTimeUpdate);
+      video.removeEventListener("seeked", onSeeked);
+      video.removeEventListener("pause", onPause);
+      video.removeEventListener("ended", onEnded);
+      video.removeEventListener("volumechange", onVolumeChange);
+      video.removeEventListener("ratechange", onRateChange);
+    };
+  }, [
+    videoEl,
+    src,
+    clearLoadTimeout,
+    finishPendingLoad,
+    handleEnded,
+    safeSet,
+    scheduleSave,
+    updateProgressUi,
+  ]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -399,7 +426,6 @@ export function usePrincesaPlayback({
     src,
     error,
     isLoading,
-    mediaReady: media !== null,
     resumeHint,
     showResumeChoice,
     pendingResumeTime,

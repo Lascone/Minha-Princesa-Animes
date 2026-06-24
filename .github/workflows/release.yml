@@ -48,10 +48,9 @@ jobs:
             ## Minha Princesa Animes v__VERSION__
 
             ### Novidades
-            - Player Video.js completo com controles cinema, atalhos e skin Princesa
-            - Troca de episódio estável sem tela preta (loadSource nativo)
+            - Corrige tela preta ao clicar em Assistir (VideoSkin oficial + eventos nativos)
+            - Player Video.js com controles cinema, atalhos e skin Princesa
             - Retomar, Up Next, auto-próximo e continuar assistindo preservados
-            - Visual rosa degradê na skin e no frame do player
 
             Instale o `.exe` (NSIS) ou `.msi` abaixo. O app verifica atualizações automaticamente via GitHub Releases.
           releaseDraft: false
