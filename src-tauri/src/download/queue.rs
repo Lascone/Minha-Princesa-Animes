@@ -1122,6 +1122,17 @@ mod integration_tests {
         .await;
     }
 
+    #[tokio::test]
+    #[ignore = "rede + ffmpeg: cargo test download_animesdigital_megami_ep12 -- --ignored --nocapture"]
+    async fn download_animesdigital_megami_ep12() {
+        download_test_episode(
+            "https://animesdigital.org/video/a/136716/",
+            "animesdigital_megami_e12_test.mp4",
+            1_000_000,
+        )
+        .await;
+    }
+
     struct SmokeCase {
         label: &'static str,
         source: AnimeSourceId,

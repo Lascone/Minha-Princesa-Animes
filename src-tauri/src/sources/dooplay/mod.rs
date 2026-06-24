@@ -1,6 +1,8 @@
+mod blogger;
 mod client;
 pub mod config;
 mod embed;
+pub use blogger::resolve_blogger_stream;
 pub mod parser;
 
 pub use config::{AOCC_CONFIG, DooplaySiteConfig, MEUSANIMES_CONFIG};

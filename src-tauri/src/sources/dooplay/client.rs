@@ -71,6 +71,32 @@ impl DooplayClient {
         Ok(response.text().await?)
     }
 
+    pub async fn post_form(
+        &self,
+        url: &str,
+        body: &str,
+        referer: Option<&str>,
+    ) -> Result<String, SourceError> {
+        use reqwest::header::{CONTENT_TYPE, HeaderValue};
+
+        let mut headers = self.stream_headers(referer);
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/x-www-form-urlencoded;charset=UTF-8"),
+        );
+        headers.insert("x-same-domain", HeaderValue::from_static("1"));
+
+        let response = self
+            .client
+            .post(url)
+            .headers(headers)
+            .body(body.to_string())
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.text().await?)
+    }
+
     pub async fn fetch_bytes(&self, url: &str, referer: Option<&str>) -> Result<Vec<u8>, SourceError> {
         let bytes = self
             .client
