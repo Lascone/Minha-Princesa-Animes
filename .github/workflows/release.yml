@@ -48,11 +48,10 @@ jobs:
             ## Minha Princesa Animes v__VERSION__
 
             ### Novidades
-            - Player cinema estável: troca de episódio sem tela preta ao pular ou usar auto-próximo
-            - Visual rosa degradê no player, loading e continuar assistindo
-            - Retomar de onde parou mais confiável na biblioteca
-            - Barra de título escura no Windows alinhada ao tema do app
-            - Melhorias de estabilidade no ciclo de vida do Plyr
+            - Player Video.js completo com controles cinema, atalhos e skin Princesa
+            - Troca de episódio estável sem tela preta (loadSource nativo)
+            - Retomar, Up Next, auto-próximo e continuar assistindo preservados
+            - Visual rosa degradê na skin e no frame do player
 
             Instale o `.exe` (NSIS) ou `.msi` abaixo. O app verifica atualizações automaticamente via GitHub Releases.
           releaseDraft: false

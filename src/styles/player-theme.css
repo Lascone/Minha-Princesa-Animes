@@ -1,82 +1,5 @@
-/* Tema Plyr — Minha Princesa Animes (cinema) */
-.plyr-princesa {
-  --plyr-color-main: #e85d75;
-  --plyr-focus-visible-color: #f07088;
-  --plyr-video-background: #000;
-  --plyr-badge-background: rgba(232, 93, 117, 0.25);
-  --plyr-badge-text-color: #f5f0f8;
-  --plyr-badge-border-radius: 6px;
-  --plyr-captions-background: rgba(10, 8, 16, 0.85);
-  --plyr-captions-text-color: #f5f0f8;
-  --plyr-control-icon-size: 16px;
-  --plyr-control-spacing: 10px;
-  --plyr-control-radius: 8px;
-  --plyr-control-toggle-checked-background: #e85d75;
-  --plyr-video-controls-background: linear-gradient(
-    transparent,
-    rgba(10, 8, 16, 0.4) 20%,
-    rgba(10, 8, 16, 0.94)
-  );
-  --plyr-video-control-color: #f5f0f8;
-  --plyr-video-control-color-hover: #fff;
-  --plyr-video-control-background-hover: rgba(232, 93, 117, 0.88);
-  --plyr-menu-background: rgba(18, 14, 26, 0.97);
-  --plyr-menu-color: #f5f0f8;
-  --plyr-menu-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
-  --plyr-menu-radius: 10px;
-  --plyr-menu-item-arrow-color: #a89bb5;
-  --plyr-range-fill-background: linear-gradient(90deg, #e85d75, #a78bfa);
-  --plyr-range-track-background: rgba(255, 255, 255, 0.16);
-  --plyr-range-thumb-background: #fff;
-  --plyr-range-thumb-shadow: 0 2px 8px rgba(232, 93, 117, 0.45);
-  --plyr-progress-loading-background: rgba(232, 93, 117, 0.35);
-  --plyr-tooltip-background: rgba(18, 14, 26, 0.96);
-  --plyr-tooltip-color: #f5f0f8;
-  --plyr-tooltip-radius: 6px;
-  --plyr-font-family: "Segoe UI", Inter, system-ui, sans-serif;
-  --plyr-font-size-base: 13px;
-  --plyr-font-size-small: 11px;
-  --plyr-font-size-time: 12px;
-  width: 100%;
-  height: 100%;
-  border-radius: inherit;
-  overflow: hidden;
-}
+/* Tema cinema — Minha Princesa Animes (Video.js) */
 
-.plyr-princesa .plyr {
-  width: 100%;
-  height: 100%;
-  border-radius: inherit;
-}
-
-.plyr-princesa .plyr__video-wrapper {
-  height: 100%;
-}
-
-.plyr-princesa .plyr__control--overlaid {
-  background: linear-gradient(135deg, rgba(232, 93, 117, 0.94), rgba(167, 139, 250, 0.9));
-  border: 2px solid rgba(255, 255, 255, 0.28);
-  box-shadow: 0 8px 28px rgba(232, 93, 117, 0.45);
-}
-
-.plyr-princesa .plyr--playing .plyr__control--overlaid {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.plyr-princesa .plyr__control--overlaid:hover {
-  background: linear-gradient(135deg, #f07088, #b89aff);
-}
-
-.plyr-princesa .plyr__progress__buffer {
-  color: rgba(255, 255, 255, 0.2);
-}
-
-.plyr-princesa .plyr__volume input[type="range"] {
-  max-width: 68px;
-}
-
-/* Cinema frame */
 .video-player-panel--cinema {
   margin-bottom: 1.25rem;
   background: transparent;
@@ -110,6 +33,7 @@
   opacity: 0.55;
 }
 
+.player-princesa,
 .video-player-aspect {
   position: relative;
   z-index: 1;
@@ -131,18 +55,18 @@
   border-radius: calc(var(--radius) + 2px);
 }
 
-.video-player-aspect .video-player {
+.video-player-aspect .video-player,
+.video-player-aspect video {
   width: 100%;
   height: 100%;
   display: block;
   object-fit: contain;
-  background: #000;
 }
 
 .video-player-loading {
   position: absolute;
   inset: 0;
-  z-index: 5;
+  z-index: 8;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -153,6 +77,7 @@
   color: var(--text-secondary);
   font-size: 0.88rem;
   overflow: hidden;
+  pointer-events: none;
 }
 
 .video-player-loading-glow {
@@ -179,13 +104,12 @@
   font-size: 1.5rem;
 }
 
-/* Top overlay */
 .player-cinema-top {
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
-  z-index: 6;
+  z-index: 9;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -260,11 +184,10 @@
   border-color: rgba(232, 93, 117, 0.5);
 }
 
-/* Resume choice */
 .player-resume-choice {
   position: absolute;
   inset: 0;
-  z-index: 7;
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -312,7 +235,7 @@
   position: absolute;
   left: 1rem;
   bottom: 4.75rem;
-  z-index: 6;
+  z-index: 9;
   display: inline-flex;
   align-items: center;
   gap: 0.45rem;
@@ -326,12 +249,11 @@
   animation: fadeInUp 0.35s ease both;
 }
 
-/* Up Next preview */
 .player-up-next {
   position: absolute;
   right: 1rem;
   bottom: 4.5rem;
-  z-index: 6;
+  z-index: 9;
   max-width: min(300px, 42vw);
   animation: slideInUp 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
 }

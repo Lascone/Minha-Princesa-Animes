@@ -9,7 +9,7 @@ import { TrayCloseModal } from "./components/TrayCloseModal";
 import { useDownloads } from "./hooks/useDownloads";
 import type { Page } from "./types";
 import "./styles/app.css";
-import "./styles/plyr-theme.css";
+import "./styles/player-theme.css";
 
 function App() {
   const [page, setPage] = useState<Page>("home");

@@ -1,9 +1,11 @@
-import "plyr/dist/plyr.css";
 import type { DownloadItem } from "../types";
-import { usePlyrPlayer } from "../hooks/usePlyrPlayer";
+import { Video } from "@videojs/react/video";
 import { Icon } from "./Icon";
 import { PlayerOverlay } from "./PlayerOverlay";
 import { PlayerUpNext } from "./PlayerUpNext";
+import { PrincesaPlayer } from "../player/createPrincesaPlayer";
+import { PrincesaVideoSkin } from "../player/PrincesaVideoSkin";
+import { usePrincesaPlayback } from "../player/usePrincesaPlayback";
 
 interface VideoPlayerProps {
   item: DownloadItem;
@@ -12,15 +14,14 @@ interface VideoPlayerProps {
   onClose: () => void;
 }
 
-export function VideoPlayer({
+function VideoPlayerInner({
   item,
   nextEpisode,
   onNextEpisode,
   onClose,
 }: VideoPlayerProps) {
   const {
-    containerRef,
-    videoRef,
+    src,
     error,
     isLoading,
     resumeHint,
@@ -33,7 +34,7 @@ export function VideoPlayer({
     playNextNow,
     cancelAutoNext,
     dismissUpNext,
-  } = usePlyrPlayer({ item, nextEpisode, onNextEpisode });
+  } = usePrincesaPlayback({ item, nextEpisode, onNextEpisode });
 
   if (error) {
     return (
@@ -50,7 +51,7 @@ export function VideoPlayer({
 
   return (
     <div className="video-player-panel video-player-panel--cinema">
-      <div ref={containerRef} className="video-player-cinema-frame plyr-princesa">
+      <div className="video-player-cinema-frame">
         <div className="video-player-aspect">
           {isLoading && (
             <div className="video-player-loading" aria-hidden="true">
@@ -81,14 +82,37 @@ export function VideoPlayer({
             />
           )}
 
-          <video
-            ref={videoRef}
-            className="video-player"
-            playsInline
-            preload="metadata"
-          />
+          <PrincesaVideoSkin>
+            <Video
+              src={src}
+              className="video-player"
+              playsInline
+              preload="metadata"
+            />
+          </PrincesaVideoSkin>
         </div>
       </div>
     </div>
+  );
+}
+
+export function VideoPlayer(props: VideoPlayerProps) {
+  if (!props.item.outputPath) {
+    return (
+      <div className="video-player-panel video-player-panel--error">
+        <div className="video-player-error">
+          <Icon name="fa-circle-exclamation" /> Arquivo não encontrado
+        </div>
+        <button type="button" className="btn-ghost btn-sm" onClick={props.onClose}>
+          <Icon name="fa-xmark" /> Fechar
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <PrincesaPlayer.Provider>
+      <VideoPlayerInner {...props} />
+    </PrincesaPlayer.Provider>
   );
 }
