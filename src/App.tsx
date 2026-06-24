@@ -5,6 +5,7 @@ import { CatalogGrid } from "./components/CatalogGrid";
 import { DownloadQueue } from "./components/DownloadQueue";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { TrayCloseModal } from "./components/TrayCloseModal";
 import { useDownloads } from "./hooks/useDownloads";
 import type { Page } from "./types";
 import "./styles/app.css";
@@ -35,6 +36,7 @@ function App() {
 
   return (
     <div className="app-shell">
+      <TrayCloseModal />
       <Sidebar
         current={page}
         onNavigate={setPage}

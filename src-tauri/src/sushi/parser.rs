@@ -316,11 +316,8 @@ pub fn apply_catalog_filters(mut page: CatalogPage, filters: &CatalogFilters) ->
 
     match filters.media_filter {
         MediaFilter::All => {}
-        MediaFilter::Anime => page.items.retain(|item| item.url.contains("/anime/")),
-        MediaFilter::Filme => {
-            page.items
-                .retain(|item| item.url.contains("/filme/") || item.url.contains("/assistir/"))
-        }
+        MediaFilter::Anime => page.items.retain(|item| is_anime_catalog_url(&item.url)),
+        MediaFilter::Filme => page.items.retain(|item| is_filme_catalog_url(&item.url)),
     }
 
     match filters.sort {
@@ -336,6 +333,23 @@ pub fn apply_catalog_filters(mut page: CatalogPage, filters: &CatalogFilters) ->
     }
 
     page
+}
+
+fn is_anime_catalog_url(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    if is_filme_catalog_url(url) {
+        return false;
+    }
+    lower.contains("/anime/")
+        || (lower.contains("/a/") && !lower.contains("/e/"))
+        || lower.contains("goyabu.io/anime")
+}
+
+fn is_filme_catalog_url(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    lower.contains("/filme/")
+        || lower.contains("/filmes/")
+        || lower.contains("/assistir/")
 }
 
 fn is_catalog_media_href(href: &str) -> bool {
@@ -602,6 +616,28 @@ mod tests {
         assert!(is_catalog_media_href("/anime/overlord-175"));
         assert!(is_catalog_media_href("/filme/some-movie"));
         assert!(is_catalog_media_href("/assistir/some-movie"));
+    }
+
+    #[test]
+    fn media_filter_keeps_meusanimes_urls() {
+        let page = CatalogPage {
+            items: vec![CatalogItem {
+                title: "One Piece".to_string(),
+                url: "https://meusanimes.blog/a/one-piece-1/".to_string(),
+                poster: None,
+                category: None,
+            }],
+            page: 1,
+            has_next: false,
+        };
+        let filters = CatalogFilters {
+            media_filter: MediaFilter::Anime,
+            sort: CatalogSort::Default,
+            category: None,
+            title_filter: None,
+        };
+        let filtered = apply_catalog_filters(page, &filters);
+        assert_eq!(filtered.items.len(), 1);
     }
 
     #[tokio::test]

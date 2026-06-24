@@ -1,5 +1,5 @@
 use super::{AnimeSource, SourceError, SourceId};
-use super::{goyabu, sushianimes};
+use super::{animesdigital, animesonlinecc, goyabu, meusanimes, sushianimes};
 
 pub struct SourceRegistry;
 
@@ -8,6 +8,9 @@ impl SourceRegistry {
         match id {
             SourceId::Sushianimes => Box::new(sushianimes::SushiSource),
             SourceId::Goyabu => Box::new(goyabu::GoyabuSource),
+            SourceId::Meusanimes => Box::new(meusanimes::MeusanimesSource),
+            SourceId::Animesonlinecc => Box::new(animesonlinecc::AnimesonlineccSource),
+            SourceId::Animesdigital => Box::new(animesdigital::AnimesdigitalSource),
         }
     }
 

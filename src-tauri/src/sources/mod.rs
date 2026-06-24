@@ -1,5 +1,10 @@
+pub mod animesdigital;
+pub mod animesonlinecc;
+pub mod dooplay;
 pub mod goyabu;
+pub mod meusanimes;
 pub mod registry;
+pub mod shared;
 pub mod sushianimes;
 
 use crate::models::{
@@ -78,6 +83,9 @@ pub async fn parse_anime(source: SourceId, url: &str) -> Result<AnimeInfo, Sourc
     match source {
         SourceId::Sushianimes => sushianimes::parse_anime(url).await,
         SourceId::Goyabu => goyabu::parse_anime(url).await,
+        SourceId::Meusanimes => meusanimes::parse_anime(url).await,
+        SourceId::Animesonlinecc => animesonlinecc::parse_anime(url).await,
+        SourceId::Animesdigital => animesdigital::parse_anime(url).await,
     }
 }
 
@@ -85,6 +93,9 @@ pub async fn browse(source: SourceId, req: &BrowseRequest) -> Result<CatalogPage
     match source {
         SourceId::Sushianimes => sushianimes::browse(req).await,
         SourceId::Goyabu => goyabu::browse(req).await,
+        SourceId::Meusanimes => meusanimes::browse(req).await,
+        SourceId::Animesonlinecc => animesonlinecc::browse(req).await,
+        SourceId::Animesdigital => animesdigital::browse(req).await,
     }
 }
 
@@ -92,6 +103,9 @@ pub async fn search(source: SourceId, req: &SearchRequest) -> Result<CatalogPage
     match source {
         SourceId::Sushianimes => sushianimes::search(req).await,
         SourceId::Goyabu => goyabu::search(req).await,
+        SourceId::Meusanimes => meusanimes::search(req).await,
+        SourceId::Animesonlinecc => animesonlinecc::search(req).await,
+        SourceId::Animesdigital => animesdigital::search(req).await,
     }
 }
 
@@ -99,6 +113,9 @@ pub async fn categories(source: SourceId) -> Result<Vec<CategoryInfo>, SourceErr
     match source {
         SourceId::Sushianimes => sushianimes::categories().await,
         SourceId::Goyabu => goyabu::categories().await,
+        SourceId::Meusanimes => meusanimes::categories().await,
+        SourceId::Animesonlinecc => animesonlinecc::categories().await,
+        SourceId::Animesdigital => animesdigital::categories().await,
     }
 }
 
@@ -106,6 +123,9 @@ pub async fn resolve_stream(source: SourceId, episode_url: &str) -> Result<Strea
     match source {
         SourceId::Sushianimes => sushianimes::resolve_stream(episode_url).await,
         SourceId::Goyabu => goyabu::resolve_stream(episode_url).await,
+        SourceId::Meusanimes => meusanimes::resolve_stream(episode_url).await,
+        SourceId::Animesonlinecc => animesonlinecc::resolve_stream(episode_url).await,
+        SourceId::Animesdigital => animesdigital::resolve_stream(episode_url).await,
     }
 }
 
@@ -113,6 +133,9 @@ pub async fn fetch_image(source: SourceId, url: &str) -> Result<Vec<u8>, SourceE
     match source {
         SourceId::Sushianimes => sushianimes::fetch_image(url).await,
         SourceId::Goyabu => goyabu::fetch_image(url).await,
+        SourceId::Meusanimes => meusanimes::fetch_image(url).await,
+        SourceId::Animesonlinecc => animesonlinecc::fetch_image(url).await,
+        SourceId::Animesdigital => animesdigital::fetch_image(url).await,
     }
 }
 

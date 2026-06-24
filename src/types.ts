@@ -1,4 +1,9 @@
-export type AnimeSourceId = "sushianimes" | "goyabu";
+export type AnimeSourceId =
+  | "sushianimes"
+  | "goyabu"
+  | "meusanimes"
+  | "animesonlinecc"
+  | "animesdigital";
 
 export type EpisodeInfo = {
   number: number;

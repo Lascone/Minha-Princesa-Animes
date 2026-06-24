@@ -5,6 +5,7 @@ mod models;
 mod sources;
 mod state;
 mod sushi;
+mod tray;
 
 use download::resolve_ffmpeg_path;
 use state::AppState;
@@ -65,6 +66,12 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(state)
         .setup(|app| {
+            tray::setup_tray(app.handle())?;
+
+            if let Some(window) = app.get_webview_window("main") {
+                tray::attach_window_handlers(&window);
+            }
+
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
@@ -105,6 +112,8 @@ pub fn run() {
             commands::get_ffmpeg_info,
             commands::pick_download_folder,
             commands::fetch_poster,
+            commands::hide_window_to_tray,
+            commands::exit_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

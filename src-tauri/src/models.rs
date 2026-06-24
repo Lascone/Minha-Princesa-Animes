@@ -6,6 +6,9 @@ pub enum AnimeSourceId {
     #[default]
     Sushianimes,
     Goyabu,
+    Meusanimes,
+    Animesonlinecc,
+    Animesdigital,
 }
 
 impl AnimeSourceId {
@@ -13,11 +16,23 @@ impl AnimeSourceId {
         match self {
             Self::Sushianimes => "Sushi Animes",
             Self::Goyabu => "Goyabu",
+            Self::Meusanimes => "Meus Animes",
+            Self::Animesonlinecc => "Animes Online CC",
+            Self::Animesdigital => "Animes Digital",
         }
     }
 
     pub fn detect_from_url(url: &str) -> Option<Self> {
         let lower = url.to_lowercase();
+        if lower.contains("meusanimes.blog") || lower.contains("meusanimes.") {
+            return Some(Self::Meusanimes);
+        }
+        if lower.contains("animesonlinecc.to") {
+            return Some(Self::Animesonlinecc);
+        }
+        if lower.contains("animesdigital.org") {
+            return Some(Self::Animesdigital);
+        }
         if lower.contains("goyabu.io") || lower.contains("goyabu.") {
             return Some(Self::Goyabu);
         }

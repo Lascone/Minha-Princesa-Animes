@@ -72,15 +72,31 @@ pub async fn ensure_ffmpeg_path(configured: &str) -> Result<String, String> {
 fn candidate_paths() -> Vec<(String, FfmpegSource)> {
     let mut paths = Vec::new();
 
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        let binaries = std::path::Path::new(&manifest).join("binaries");
+        for name in ["ffmpeg-x86_64-pc-windows-msvc.exe", "ffmpeg.exe"] {
+            let candidate = binaries.join(name);
+            if candidate.is_file() {
+                paths.push((
+                    candidate.to_string_lossy().into_owned(),
+                    FfmpegSource::Bundled,
+                ));
+            }
+        }
+    }
+
     if let Some(dir) = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
     {
         for name in ["ffmpeg.exe", "ffmpeg-x86_64-pc-windows-msvc.exe"] {
-            paths.push((
-                dir.join(name).to_string_lossy().into_owned(),
-                FfmpegSource::Bundled,
-            ));
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                paths.push((
+                    candidate.to_string_lossy().into_owned(),
+                    FfmpegSource::Bundled,
+                ));
+            }
         }
     }
 
@@ -91,11 +107,12 @@ fn candidate_paths() -> Vec<(String, FfmpegSource)> {
         ));
     }
 
+    paths.push(("ffmpeg".to_string(), FfmpegSource::System));
+
     for path in windows_system_candidates() {
         paths.push((path, FfmpegSource::System));
     }
 
-    paths.push(("ffmpeg".to_string(), FfmpegSource::System));
     paths
 }
 

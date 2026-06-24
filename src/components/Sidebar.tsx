@@ -41,13 +41,22 @@ export function Sidebar({ current, onNavigate, activeDownloads }: SidebarProps) 
       </nav>
       <div className="sidebar-footer">
         <p className="sidebar-sources">
-          <Icon name="fa-database" /> 2 fontes: Sushi Animes e Goyabu
+          <Icon name="fa-database" /> 5 fontes disponíveis
         </p>
         <a href="https://sushianimes.com.br" target="_blank" rel="noreferrer">
           <Icon name="fa-link" /> sushianimes.com.br
         </a>
         <a href="https://goyabu.io" target="_blank" rel="noreferrer">
           <Icon name="fa-link" /> goyabu.io
+        </a>
+        <a href="https://meusanimes.blog" target="_blank" rel="noreferrer">
+          <Icon name="fa-link" /> meusanimes.blog
+        </a>
+        <a href="https://animesonlinecc.to" target="_blank" rel="noreferrer">
+          <Icon name="fa-link" /> animesonlinecc.to
+        </a>
+        <a href="https://animesdigital.org" target="_blank" rel="noreferrer">
+          <Icon name="fa-link" /> animesdigital.org
         </a>
       </div>
     </aside>

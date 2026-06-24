@@ -1,8 +1,6 @@
 import type { AnimeSourceId } from "../types";
-import { sourceLabel } from "../utils/source";
+import { ALL_SOURCES, sourceLabel } from "../utils/source";
 import { Icon } from "./Icon";
-
-const SOURCES: AnimeSourceId[] = ["sushianimes", "goyabu"];
 
 interface SourcePickerProps {
   value: AnimeSourceId;
@@ -16,7 +14,7 @@ export function SourcePicker({ value, onChange }: SourcePickerProps) {
         <Icon name="fa-database" /> Fonte
       </span>
       <div className="source-picker-chips">
-        {SOURCES.map((id) => (
+        {ALL_SOURCES.map((id) => (
           <button
             key={id}
             type="button"

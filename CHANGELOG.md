@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.0 (2026-06-24)
+
+- Três novas fontes: **Meus Animes**, **Animes Online CC** e **Animes Digital**
+- Módulo DooPlay compartilhado para Meus Animes e Animes Online CC
+- Animes Digital com suporte a filmes no catálogo
+- Seletor de fonte com 5 opções e scroll horizontal
+- Detecção automática de URL para as novas fontes
+- Testes de integração `#[ignore]` por fonte (parse + stream)
+
 ## v0.2.0 (2026-06-24)
 
 - Segunda fonte: **Goyabu** (catálogo, busca, categorias, parse e download)

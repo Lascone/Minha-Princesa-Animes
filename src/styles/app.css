@@ -184,8 +184,12 @@ body {
 
 .source-picker-chips {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 0.45rem;
+  overflow-x: auto;
+  max-width: 100%;
+  padding-bottom: 0.15rem;
+  scrollbar-width: thin;
 }
 
 .source-chip {
@@ -197,6 +201,8 @@ body {
   font-size: 0.82rem;
   cursor: pointer;
   transition: border-color 0.15s, color 0.15s, background 0.15s;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .source-chip:hover {
@@ -1293,6 +1299,48 @@ select:focus {
   position: sticky;
   bottom: 0;
   background: var(--bg-card);
+}
+
+.tray-close-modal {
+  width: min(480px, 100%);
+}
+
+.tray-close-body {
+  padding: 1.1rem 1.25rem 0.25rem;
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.tray-close-body p {
+  margin: 0 0 0.85rem;
+}
+
+.tray-close-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+  font-size: 0.84rem;
+  color: var(--text-muted, var(--text-secondary));
+}
+
+.tray-close-hint i {
+  margin-top: 0.15rem;
+  color: var(--accent);
+}
+
+.tray-close-footer {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.btn-danger-text {
+  color: #f07178;
+}
+
+.btn-danger-text:hover {
+  color: #ff8a90;
+  border-color: rgba(240, 113, 120, 0.35);
 }
 
 .synopsis-clamp {

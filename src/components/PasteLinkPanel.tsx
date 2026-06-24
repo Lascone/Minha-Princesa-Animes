@@ -182,7 +182,7 @@ export function PasteLinkPanel({ onDownloadStarted, initialUrl = "" }: PasteLink
 
         </h2>
 
-        <p>Cole o link do Sushi Animes ou Goyabu — anime, filme ou episódio</p>
+        <p>Cole o link de qualquer fonte suportada — anime, filme ou episódio</p>
 
       </div>
 
@@ -198,7 +198,7 @@ export function PasteLinkPanel({ onDownloadStarted, initialUrl = "" }: PasteLink
 
             type="url"
 
-            placeholder="https://sushianimes.com.br/anime/... ou https://goyabu.io/anime/..."
+            placeholder="https://sushianimes.com.br/... | goyabu.io/... | meusanimes.blog/... | animesonlinecc.to/... | animesdigital.org/..."
 
             value={url}
 

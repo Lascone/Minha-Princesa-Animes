@@ -152,8 +152,10 @@ impl CacheDb {
                 .as_secs() as i64;
             // Cache valid for 1 hour
             if now - created_at < 3600 {
-                if let Ok(items) = serde_json::from_str(&data) {
-                    return Ok(Some(items));
+                if let Ok(items) = serde_json::from_str::<Vec<CatalogItem>>(&data) {
+                    if !items.is_empty() {
+                        return Ok(Some(items));
+                    }
                 }
             }
         }

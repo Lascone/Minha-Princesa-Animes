@@ -631,6 +631,7 @@ impl DownloadManager {
         self.update_item(&app, &id, |item| {
             item.status = DownloadStatus::Downloading;
             item.progress = 0.0;
+            item.speed = "Resolvendo link do vídeo...".to_string();
         })
         .await;
 
@@ -818,11 +819,18 @@ impl DownloadManager {
         stop_flag: StdArc<AtomicBool>,
     ) -> Result<(), String> {
         self.update_item(app, id, |item| {
-            item.speed = "Preparando FFmpeg...".to_string();
+            item.speed = "Localizando FFmpeg...".to_string();
         })
         .await;
 
         let ffmpeg_path = self.resolved_ffmpeg(settings).await?;
+
+        self.update_item(app, id, |item| {
+            item.speed = "Conectando ao stream...".to_string();
+            item.progress = 0.0;
+        })
+        .await;
+
         let child_slot = StdArc::new(AsyncMutex::new(None::<Child>));
         self.child_slots
             .lock()
@@ -845,24 +853,43 @@ impl DownloadManager {
                 let app = app.clone();
                 let id_owned = id_owned.clone();
                 let gate = StdArc::new(std::sync::Mutex::new((Instant::now(), 0.0f64)));
-                move |progress| {
-                    let mut g = gate.lock().unwrap_or_else(|e| e.into_inner());
-                    let now = Instant::now();
-                    if now.duration_since(g.0).as_millis() < PROGRESS_EMIT_MIN_MS as u128
-                        && (progress - g.1).abs() < 5.0
-                    {
-                        return;
-                    }
-                    g.0 = now;
-                    g.1 = progress;
-                    drop(g);
-                    let mgr = mgr.clone_inner();
-                    let app = app.clone();
-                    let id = id_owned.clone();
-                    tauri::async_runtime::spawn(async move {
-                        mgr.update_progress_throttled(&app, &id, progress, "Convertendo vídeo…", false)
+                move |event| match event {
+                    hls::HlsEvent::Connecting(secs) => {
+                        let mgr = mgr.clone_inner();
+                        let app = app.clone();
+                        let id = id_owned.clone();
+                        tauri::async_runtime::spawn(async move {
+                            mgr.update_item(&app, &id, |item| {
+                                item.speed =
+                                    format!("Conectando ao stream... ({secs}s)");
+                            })
                             .await;
-                    });
+                        });
+                    }
+                    hls::HlsEvent::Progress(progress) => {
+                        let mut g = gate.lock().unwrap_or_else(|e| e.into_inner());
+                        let now = Instant::now();
+                        if now.duration_since(g.0).as_millis() < PROGRESS_EMIT_MIN_MS as u128
+                            && (progress - g.1).abs() < 1.0
+                        {
+                            return;
+                        }
+                        g.0 = now;
+                        g.1 = progress;
+                        drop(g);
+                        let mgr = mgr.clone_inner();
+                        let app = app.clone();
+                        let id = id_owned.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let label = if progress < 3.0 {
+                                "Conectando ao stream..."
+                            } else {
+                                "Convertendo vídeo…"
+                            };
+                            mgr.update_progress_throttled(&app, &id, progress, label, false)
+                                .await;
+                        });
+                    }
                 }
             },
         )
@@ -988,6 +1015,7 @@ mod integration_tests {
 
     async fn download_test_episode(episode_url: &str, output_name: &str, min_bytes: u64) {
         use crate::download::validate::is_valid_episode_file;
+        use crate::download::{resolve_ffmpeg_path, FfmpegSource};
         use futures_util::StreamExt;
         use std::sync::atomic::AtomicBool;
         use std::time::Instant;
@@ -1005,19 +1033,27 @@ mod integration_tests {
         let dl_start = Instant::now();
         match stream.kind {
             StreamKind::Hls => {
-                let ffmpeg = "ffmpeg";
-                assert!(hls::ffmpeg_available(ffmpeg), "ffmpeg required");
+                let resolved = resolve_ffmpeg_path("ffmpeg");
+                assert_ne!(
+                    resolved.source,
+                    FfmpegSource::Missing,
+                    "ffmpeg required for HLS test"
+                );
+                let ffmpeg = resolved.path;
                 let stop = StdArc::new(AtomicBool::new(false));
                 let slot = StdArc::new(AsyncMutex::new(None));
                 hls::download_hls(
-                    ffmpeg,
+                    &ffmpeg,
                     &stream.url,
                     &output,
                     &stream.referer,
                     &stream.origin,
                     stop,
                     slot,
-                    |p| eprintln!("progress {:.0}%", p),
+                    |event| match event {
+                        hls::HlsEvent::Connecting(secs) => eprintln!("connecting {secs}s"),
+                        hls::HlsEvent::Progress(p) => eprintln!("progress {:.0}%", p),
+                    },
                 )
                 .await
                 .expect("ffmpeg download");
@@ -1073,5 +1109,122 @@ mod integration_tests {
             1_000_000,
         )
         .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "rede + ffmpeg: cargo test download_meusanimes_eden_ep1 -- --ignored --nocapture"]
+    async fn download_meusanimes_eden_ep1() {
+        download_test_episode(
+            "https://meusanimes.blog/e/eden-1-episodio-1/",
+            "meusanimes_eden_e1_test.mp4",
+            1_000_000,
+        )
+        .await;
+    }
+
+    struct SmokeCase {
+        label: &'static str,
+        source: AnimeSourceId,
+        anime_url: &'static str,
+        episode_url: &'static str,
+        download_file: &'static str,
+        min_bytes: u64,
+    }
+
+    async fn smoke_catalog(source: AnimeSourceId, label: &str) {
+        use crate::models::{BrowseRequest, CatalogFilters, CatalogSort, CatalogType, MediaFilter};
+
+        let req = BrowseRequest {
+            catalog_type: CatalogType::Animes,
+            page: 1,
+            category_slug: None,
+            filters: CatalogFilters {
+                media_filter: MediaFilter::Anime,
+                sort: CatalogSort::Default,
+                category: None,
+                title_filter: None,
+            },
+            source,
+        };
+        let page = sources::browse(source, &req)
+            .await
+            .unwrap_or_else(|e| panic!("{label} catalog: {e}"));
+        assert!(
+            !page.items.is_empty(),
+            "{label} catalog returned no items"
+        );
+        eprintln!("{label} catalog OK ({} items)", page.items.len());
+    }
+
+    #[tokio::test]
+    #[ignore = "rede + ffmpeg: cargo test smoke_all_sources -- --ignored --nocapture"]
+    async fn smoke_all_sources() {
+        let cases = [
+            SmokeCase {
+                label: "Sushi Animes",
+                source: AnimeSourceId::Sushianimes,
+                anime_url: "https://sushianimes.com.br/anime/overlord-175",
+                episode_url: "https://sushianimes.com.br/anime/overlord-175-1-season-1-episode",
+                download_file: "smoke_sushi_overlord_e1.mp4",
+                min_bytes: 2_000_000,
+            },
+            SmokeCase {
+                label: "Goyabu",
+                source: AnimeSourceId::Goyabu,
+                anime_url: "https://goyabu.io/anime/ichijouma-mankitsugurashi",
+                episode_url: "https://goyabu.io/71102",
+                download_file: "smoke_goyabu_71102.mp4",
+                min_bytes: 1_000_000,
+            },
+            SmokeCase {
+                label: "Meus Animes",
+                source: AnimeSourceId::Meusanimes,
+                anime_url: "https://meusanimes.blog/a/one-piece-1/",
+                episode_url: "https://meusanimes.blog/e/one-piece-1-episodio-2/",
+                download_file: "smoke_meusanimes_op_e2.mp4",
+                min_bytes: 1_000_000,
+            },
+            SmokeCase {
+                label: "Animes Online CC",
+                source: AnimeSourceId::Animesonlinecc,
+                anime_url: "https://animesonlinecc.to/anime/one-piece/",
+                episode_url: "https://animesonlinecc.to/episodio/one-piece-episodio-835/",
+                download_file: "smoke_aocc_op_e835.mp4",
+                min_bytes: 1_000_000,
+            },
+            SmokeCase {
+                label: "Animes Digital",
+                source: AnimeSourceId::Animesdigital,
+                anime_url: "https://animesdigital.org/anime/b/one-piece-todos-episodios-5/",
+                episode_url: "https://animesdigital.org/video/a/136491/",
+                download_file: "smoke_animesdigital_op_e136491.mp4",
+                min_bytes: 1_000_000,
+            },
+        ];
+
+        for case in &cases {
+            eprintln!("\n========== {} ==========", case.label);
+            smoke_catalog(case.source, case.label).await;
+
+            let anime = sources::parse_anime(case.source, case.anime_url)
+                .await
+                .unwrap_or_else(|e| panic!("{} parse anime: {e}", case.label));
+            assert!(
+                !anime.seasons.is_empty() && !anime.seasons[0].episodes.is_empty(),
+                "{} parse returned no episodes",
+                case.label
+            );
+            eprintln!(
+                "{} parse OK: {} ({} eps)",
+                case.label,
+                anime.title,
+                anime.seasons[0].episodes.len()
+            );
+
+            download_test_episode(case.episode_url, case.download_file, case.min_bytes).await;
+            eprintln!("{} download OK", case.label);
+        }
+
+        eprintln!("\nAll 5 sources passed smoke test.");
     }
 }

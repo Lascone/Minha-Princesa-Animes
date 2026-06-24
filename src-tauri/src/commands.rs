@@ -6,8 +6,11 @@ use crate::sources::{self, source_for_url, SourceError};
 use crate::download::{resolve_ffmpeg_path, FfmpegSource};
 use base64::Engine;
 use serde::Serialize;
+use tauri::Manager;
 use tauri::State;
 use crate::state::AppState;
+
+const CATALOG_CACHE_VERSION: &str = "v2";
 
 #[tauri::command]
 pub async fn parse_anime_url(url: String) -> Result<AnimeInfo, String> {
@@ -16,7 +19,7 @@ pub async fn parse_anime_url(url: String) -> Result<AnimeInfo, String> {
         .await
         .map_err(|e| match e {
             SourceError::UnsupportedUrl => {
-                "URL inválida. Cole um link de anime ou episódio do Sushi Animes ou Goyabu."
+                "URL inválida. Cole um link de anime ou episódio de uma das fontes suportadas."
                     .to_string()
             }
             other => other.to_string(),
@@ -30,7 +33,7 @@ pub async fn search_catalog(
 ) -> Result<CatalogPage, String> {
     let source = req.source;
     let cache_key = format!(
-        "search:{source:?}:{}:{}:{:?}:{:?}",
+        "search:{CATALOG_CACHE_VERSION}:{source:?}:{}:{}:{:?}:{:?}",
         req.query, req.page, req.filters.media_filter, req.filters.sort
     );
     if let Ok(db) = state.db.lock() {
@@ -43,7 +46,7 @@ pub async fn search_catalog(
         .await
         .map_err(|e| e.to_string())?;
 
-    if req.page == 1 && !req.query.is_empty() {
+    if req.page == 1 && !req.query.is_empty() && !result.items.is_empty() {
         if let Ok(db) = state.db.lock() {
             let _ = db.add_search(&req.query);
             let _ = db.cache_catalog(&cache_key, &result.items);
@@ -60,7 +63,7 @@ pub async fn browse_catalog(
 ) -> Result<CatalogPage, String> {
     let source = req.source;
     let cache_key = format!(
-        "browse:{source:?}:{:?}:{}:{}:{:?}:{:?}",
+        "browse:{CATALOG_CACHE_VERSION}:{source:?}:{:?}:{}:{}:{:?}:{:?}",
         req.catalog_type,
         req.page,
         req.category_slug.as_deref().unwrap_or(""),
@@ -69,11 +72,13 @@ pub async fn browse_catalog(
     );
     if let Ok(db) = state.db.lock() {
         if let Ok(Some(items)) = db.get_catalog_cache(&cache_key) {
-            return Ok(CatalogPage {
-                items,
-                page: req.page,
-                has_next: true,
-            });
+            if !items.is_empty() {
+                return Ok(CatalogPage {
+                    items,
+                    page: req.page,
+                    has_next: true,
+                });
+            }
         }
     }
 
@@ -81,8 +86,10 @@ pub async fn browse_catalog(
         .await
         .map_err(|e| e.to_string())?;
 
-    if let Ok(db) = state.db.lock() {
-        let _ = db.cache_catalog(&cache_key, &result.items);
+    if !result.items.is_empty() {
+        if let Ok(db) = state.db.lock() {
+            let _ = db.cache_catalog(&cache_key, &result.items);
+        }
     }
 
     Ok(result)
@@ -296,4 +303,18 @@ pub async fn fetch_poster(url: String, state: State<'_, AppState>) -> Result<Opt
     cache.insert(trimmed.to_string(), data_url.clone());
 
     Ok(Some(data_url))
+}
+
+#[tauri::command]
+pub fn hide_window_to_tray(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Janela principal não encontrada".to_string())?;
+    crate::tray::hide_to_tray(&window);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn exit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }

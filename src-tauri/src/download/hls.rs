@@ -1,15 +1,29 @@
 use crate::download::process_util;
 use crate::sushi::client::USER_AGENT_STR;
+use reqwest::header::{HeaderMap, HeaderValue, ORIGIN, REFERER, USER_AGENT};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::time::timeout;
+use tokio::time::{interval, timeout, MissedTickBehavior};
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
+const LINE_READ_TIMEOUT: Duration = Duration::from_millis(500);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy)]
+pub enum HlsEvent {
+    /// Atualiza só o texto de status (progresso permanece 0%).
+    Connecting(u64),
+    /// Progresso real do FFmpeg (3–95%).
+    Progress(f64),
+}
 
 #[derive(Error, Debug)]
 pub enum HlsError {
@@ -21,6 +35,55 @@ pub enum HlsError {
     Io(#[from] std::io::Error),
 }
 
+pub async fn verify_stream_reachable(
+    stream_url: &str,
+    referer: &str,
+    origin: &str,
+) -> Result<(), HlsError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_STR));
+    headers.insert(
+        REFERER,
+        HeaderValue::from_str(referer).unwrap_or_else(|_| HeaderValue::from_static("")),
+    );
+    headers.insert(
+        ORIGIN,
+        HeaderValue::from_str(origin).unwrap_or_else(|_| HeaderValue::from_static("")),
+    );
+
+    let response = reqwest::Client::builder()
+        .default_headers(headers)
+        .timeout(PREFLIGHT_TIMEOUT)
+        .build()
+        .map_err(|e| HlsError::Failed(e.to_string()))?
+        .get(stream_url)
+        .send()
+        .await
+        .map_err(|e| HlsError::Failed(format!("Stream inacessível: {e}")))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(HlsError::Failed(format!(
+            "Stream retornou HTTP {} (referer: {referer})",
+            status.as_u16()
+        )));
+    }
+
+    if stream_url.contains(".m3u8") || stream_url.contains(".txt") {
+        let body = response
+            .text()
+            .await
+            .map_err(|e| HlsError::Failed(e.to_string()))?;
+        if !body.contains("#EXTM3U") && !body.contains("#EXT-X-") {
+            return Err(HlsError::Failed(
+                "Resposta do stream não é um manifesto HLS válido".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn download_hls(
     ffmpeg_path: &str,
     stream_url: &str,
@@ -29,11 +92,13 @@ pub async fn download_hls(
     origin: &str,
     stop_flag: Arc<AtomicBool>,
     child_slot: Arc<AsyncMutex<Option<Child>>>,
-    on_progress: impl Fn(f64) + Send + Sync,
+    on_event: impl Fn(HlsEvent) + Send + Sync,
 ) -> Result<(), HlsError> {
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+
+    verify_stream_reachable(stream_url, referer, origin).await?;
 
     let headers = format!(
         "Referer: {referer}\r\nOrigin: {origin}\r\nUser-Agent: {USER_AGENT_STR}\r\n"
@@ -42,10 +107,24 @@ pub async fn download_hls(
     let mut cmd = Command::new(ffmpeg_path);
     cmd.args([
         "-y",
-        "-loglevel",
-        "warning",
+        "-hide_banner",
+        "-nostdin",
+        "-stats_period",
+        "0.5",
+        "-rw_timeout",
+        "30000000",
+        "-timeout",
+        "30000000",
+        "-reconnect",
+        "1",
+        "-reconnect_streamed",
+        "1",
+        "-reconnect_delay_max",
+        "5",
         "-extension_picky",
         "0",
+        "-user_agent",
+        USER_AGENT_STR,
         "-headers",
         &headers,
         "-i",
@@ -71,6 +150,13 @@ pub async fn download_hls(
 
     let mut reader = BufReader::new(stderr).lines();
     let mut exit_status = None;
+    let started = Instant::now();
+    let mut last_progress_at = Instant::now();
+    let mut stderr_tail = String::new();
+    let mut duration_secs: Option<f64> = None;
+    let mut stream_started = false;
+    let mut heartbeat = interval(HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         if stop_flag.load(Ordering::Relaxed) {
@@ -78,31 +164,68 @@ pub async fn download_hls(
             return Err(HlsError::Cancelled);
         }
 
-        match timeout(Duration::from_millis(250), reader.next_line()).await {
-            Ok(Ok(Some(line))) => {
-                if line.contains("time=") {
-                    on_progress(parse_ffmpeg_time(&line));
-                }
+        if !stream_started && started.elapsed() > CONNECT_TIMEOUT {
+            kill_child(&child_slot).await;
+            return Err(HlsError::Failed(format!(
+                "Timeout ao conectar ao stream (90s). Última saída: {}",
+                tail_lines(&stderr_tail, 3)
+            )));
+        }
+
+        tokio::select! {
+            _ = heartbeat.tick(), if !stream_started => {
+                on_event(HlsEvent::Connecting(started.elapsed().as_secs()));
             }
-            Ok(Ok(None)) => break,
-            Ok(Err(e)) => {
-                kill_child(&child_slot).await;
-                return Err(HlsError::Io(e));
-            }
-            Err(_) => {
-                if let Some(mut c) = child_slot.lock().await.take() {
-                    match c.try_wait() {
-                        Ok(Some(status)) => {
-                            exit_status = Some(status);
+            line_result = timeout(LINE_READ_TIMEOUT, reader.next_line()) => {
+                match line_result {
+                    Ok(Ok(Some(line))) => {
+                        append_stderr_tail(&mut stderr_tail, &line);
+                        if is_ffmpeg_fatal(&line) {
+                            kill_child(&child_slot).await;
+                            return Err(HlsError::Failed(line));
+                        }
+                        if let Some(d) = parse_ffmpeg_duration(&line) {
+                            duration_secs = Some(d);
+                            last_progress_at = Instant::now();
+                            stream_started = true;
+                        }
+                        if line.contains("time=") {
+                            last_progress_at = Instant::now();
+                            stream_started = true;
+                            on_event(HlsEvent::Progress(parse_ffmpeg_time(
+                                &line,
+                                duration_secs,
+                            )));
+                        }
+                    }
+                    Ok(Ok(None)) => break,
+                    Ok(Err(e)) => {
+                        kill_child(&child_slot).await;
+                        return Err(HlsError::Io(e));
+                    }
+                    Err(_) => {
+                        if last_progress_at.elapsed() > CONNECT_TIMEOUT && !stream_started {
+                            kill_child(&child_slot).await;
+                            return Err(HlsError::Failed(format!(
+                                "Sem resposta do FFmpeg (90s). Última saída: {}",
+                                tail_lines(&stderr_tail, 3)
+                            )));
+                        }
+                        if let Some(mut c) = child_slot.lock().await.take() {
+                            match c.try_wait() {
+                                Ok(Some(status)) => {
+                                    exit_status = Some(status);
+                                    break;
+                                }
+                                Ok(None) => {
+                                    *child_slot.lock().await = Some(c);
+                                }
+                                Err(e) => return Err(HlsError::Io(e)),
+                            }
+                        } else {
                             break;
                         }
-                        Ok(None) => {
-                            *child_slot.lock().await = Some(c);
-                        }
-                        Err(e) => return Err(HlsError::Io(e)),
                     }
-                } else {
-                    break;
                 }
             }
         }
@@ -122,12 +245,50 @@ pub async fn download_hls(
 
     match exit_status {
         Some(status) if status.success() => {
-            on_progress(100.0);
+            on_event(HlsEvent::Progress(100.0));
             Ok(())
         }
-        Some(status) => Err(HlsError::Failed(format!("exit code {:?}", status.code()))),
-        None => Err(HlsError::Failed("FFmpeg terminou sem status".to_string())),
+        Some(status) => Err(HlsError::Failed(format!(
+            "FFmpeg exit {:?}. {}",
+            status.code(),
+            tail_lines(&stderr_tail, 3)
+        ))),
+        None => Err(HlsError::Failed(format!(
+            "FFmpeg terminou sem status. {}",
+            tail_lines(&stderr_tail, 3)
+        ))),
     }
+}
+
+fn is_ffmpeg_fatal(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    lower.contains("http error")
+        || lower.contains("403 forbidden")
+        || lower.contains("404 not found")
+        || lower.contains("invalid data found")
+        || lower.contains("error opening input")
+        || lower.contains("no such file or directory")
+        || lower.contains("server returned")
+}
+
+fn append_stderr_tail(buf: &mut String, line: &str) {
+    buf.push_str(line);
+    buf.push('\n');
+    if buf.len() > 4_096 {
+        let drain = buf.len().saturating_sub(4_096);
+        buf.drain(..drain);
+    }
+}
+
+fn tail_lines(text: &str, count: usize) -> String {
+    text.lines()
+        .rev()
+        .take(count)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 async fn kill_child(child_slot: &Arc<AsyncMutex<Option<Child>>>) {
@@ -137,23 +298,40 @@ async fn kill_child(child_slot: &Arc<AsyncMutex<Option<Child>>>) {
     }
 }
 
-fn parse_ffmpeg_time(line: &str) -> f64 {
+fn parse_hms_timestamp(value: &str) -> Option<f64> {
+    let parts: Vec<&str> = value.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let h: f64 = parts[0].parse().ok()?;
+    let m: f64 = parts[1].parse().ok()?;
+    let s: f64 = parts[2].parse().ok()?;
+    Some(h * 3600.0 + m * 60.0 + s)
+}
+
+fn parse_ffmpeg_duration(line: &str) -> Option<f64> {
+    let idx = line.find("Duration:")?;
+    let rest = line[idx + 9..].trim();
+    let end = rest.find(',').unwrap_or(rest.len());
+    parse_hms_timestamp(rest[..end].trim())
+}
+
+fn parse_ffmpeg_time(line: &str, duration_secs: Option<f64>) -> f64 {
     if let Some(idx) = line.find("time=") {
         let time_str = &line[idx + 5..];
         let end = time_str.find(' ').unwrap_or(time_str.len());
-        let parts: Vec<&str> = time_str[..end].split(':').collect();
-        if parts.len() == 3 {
-            let h: f64 = parts[0].parse().unwrap_or(0.0);
-            let m: f64 = parts[1].parse().unwrap_or(0.0);
-            let s: f64 = parts[2].parse().unwrap_or(0.0);
-            let total_secs = h * 3600.0 + m * 60.0 + s;
-            return (total_secs / 1440.0 * 100.0).min(95.0);
+        if let Some(total_secs) = parse_hms_timestamp(&time_str[..end]) {
+            let episode_len = duration_secs.unwrap_or(1440.0).max(1.0);
+            return (total_secs / episode_len * 100.0).min(95.0);
         }
     }
-    50.0
+    3.0
 }
 
 pub fn ffmpeg_available(path: &str) -> bool {
+    if path.trim().is_empty() {
+        return false;
+    }
     #[cfg(windows)]
     use std::os::windows::process::CommandExt;
 

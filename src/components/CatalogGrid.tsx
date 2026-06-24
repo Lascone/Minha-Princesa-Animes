@@ -32,6 +32,7 @@ export function CatalogGrid({ onSelectAnime, onDownloadStarted }: CatalogGridPro
   const [query, setQuery] = useState("");
   const [searchMode, setSearchMode] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [history, setHistory] = useState<string[]>([]);
   const [mediaFilter, setMediaFilter] = useState<MediaFilter>("all");
   const [sort, setSort] = useState<CatalogSort>("default");
@@ -60,6 +61,7 @@ export function CatalogGrid({ onSelectAnime, onDownloadStarted }: CatalogGridPro
 
   const load = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       let result: CatalogPage;
       if (searchMode && debouncedQuery.trim()) {
@@ -83,6 +85,9 @@ export function CatalogGrid({ onSelectAnime, onDownloadStarted }: CatalogGridPro
         });
       }
       setData(result);
+    } catch (err) {
+      setData({ items: [], page, hasNext: false });
+      setLoadError(String(err));
     } finally {
       setLoading(false);
     }
@@ -99,6 +104,13 @@ export function CatalogGrid({ onSelectAnime, onDownloadStarted }: CatalogGridPro
       setPage(1);
     }
   }, [source, tab]);
+
+  useEffect(() => {
+    setData(null);
+    setPage(1);
+    setSearchMode(false);
+    setQuery("");
+  }, [source]);
 
   useEffect(() => {
     load();
@@ -372,7 +384,13 @@ export function CatalogGrid({ onSelectAnime, onDownloadStarted }: CatalogGridPro
         />
       )}
 
-      {!loading && data?.items.length === 0 && (
+      {loadError && (
+        <p className="empty-state catalog-error">
+          <Icon name="fa-triangle-exclamation" /> {loadError}
+        </p>
+      )}
+
+      {!loading && !loadError && data?.items.length === 0 && (
         <p className="empty-state">
           <Icon name="fa-face-frown" /> Nenhum resultado encontrado. Tente outros filtros ou termos.
         </p>
