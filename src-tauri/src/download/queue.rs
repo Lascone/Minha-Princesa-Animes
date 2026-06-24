@@ -18,7 +18,8 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore};
 use uuid::Uuid;
 
 const PROGRESS_EMIT_MIN_MS: u64 = 500;
-const PROGRESS_PERSIST_MIN_MS: u64 = 1000;
+const PROGRESS_PERSIST_MIN_MS: u64 = 2000;
+const KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 const MP4_PROGRESS_CHUNK_BYTES: u64 = 512 * 1024;
 const MP4_STALL_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -138,15 +139,14 @@ impl DownloadManager {
             .map_err(|e| e.to_string())
     }
 
-    async fn persist_item(&self, item: &DownloadItem) {
+    fn persist_item_bg(&self, item: &DownloadItem) {
         let db = StdArc::clone(&self.db);
         let item = item.clone();
-        let _ = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             if let Ok(db) = db.lock() {
                 let _ = db.upsert_download(&item);
             }
-        })
-        .await;
+        });
     }
 
     async fn cleanup_job_state(&self, id: &str) {
@@ -190,21 +190,33 @@ impl DownloadManager {
     }
 
     async fn emit_item(&self, app: &AppHandle, item: &DownloadItem) {
-        self.persist_item(item).await;
         let _ = app.emit("download-progress", item);
+        self.persist_item_bg(item);
     }
 
     pub async fn list(&self) -> Vec<DownloadItem> {
         let settings = self.load_settings();
-        let items = self.items.lock().await;
-        let mut list: Vec<_> = items.values().cloned().collect();
+        let mut list: Vec<_> = {
+            let items = self.items.lock().await;
+            items.values().cloned().collect()
+        };
 
         if let Some(settings) = settings {
+            let mut poster_cache: HashMap<String, Option<String>> = HashMap::new();
             for item in &mut list {
-                if item.poster_path.is_none() {
-                    if let Some(path) = poster::find_poster_on_disk(&settings, &item.anime_title) {
-                        item.poster_path = Some(path.to_string_lossy().to_string());
-                    }
+                if item.poster_path.is_some() {
+                    continue;
+                }
+                let title = item.anime_title.clone();
+                let path = poster_cache
+                    .entry(title.clone())
+                    .or_insert_with(|| {
+                        poster::find_poster_on_disk(&settings, &title)
+                            .map(|p| p.to_string_lossy().to_string())
+                    })
+                    .clone();
+                if let Some(path) = path {
+                    item.poster_path = Some(path);
                 }
             }
         }
@@ -297,7 +309,7 @@ impl DownloadManager {
                 updated_at: unix_now(),
             };
             self.items.lock().await.insert(id.clone(), item.clone());
-            self.persist_item(&item).await;
+            self.persist_item_bg(&item);
             self.cancel_flags.lock().await.insert(id.clone(), false);
             self.pause_flags.lock().await.insert(id.clone(), false);
             ids.push(id);
@@ -467,13 +479,27 @@ impl DownloadManager {
         if let Some(slot) = self.child_slots.lock().await.remove(id) {
             if let Some(mut child) = slot.lock().await.take() {
                 let _ = child.kill().await;
-                let _ = child.wait().await;
+                tokio::spawn(async move {
+                    let _ =
+                        tokio::time::timeout(KILL_WAIT_TIMEOUT, child.wait()).await;
+                });
             }
         }
     }
 
+    fn spawn_kill_active(&self, id: &str) {
+        let mgr = self.clone_inner();
+        let id = id.to_string();
+        tokio::spawn(async move {
+            mgr.kill_active(&id).await;
+        });
+    }
+
     pub async fn cancel(&self, app: &AppHandle, id: &str) -> Result<(), String> {
-        self.kill_active(id).await;
+        if let Some(flag) = self.stop_flags.lock().await.get(id) {
+            flag.store(true, Ordering::Relaxed);
+        }
+
         let item = {
             let mut items = self.items.lock().await;
             let Some(item) = items.get_mut(id) else {
@@ -493,13 +519,19 @@ impl DownloadManager {
                 return Ok(());
             }
         };
-        self.emit_item(app, &item).await;
+
+        let _ = app.emit("download-progress", &item);
+        self.persist_item_bg(&item);
+        self.spawn_kill_active(id);
         self.queue_notify.notify_one();
         Ok(())
     }
 
     pub async fn pause(&self, app: &AppHandle, id: &str) -> Result<(), String> {
-        self.kill_active(id).await;
+        if let Some(flag) = self.stop_flags.lock().await.get(id) {
+            flag.store(true, Ordering::Relaxed);
+        }
+
         let item = {
             let mut items = self.items.lock().await;
             let Some(item) = items.get_mut(id) else {
@@ -517,7 +549,10 @@ impl DownloadManager {
                 return Ok(());
             }
         };
-        self.emit_item(app, &item).await;
+
+        let _ = app.emit("download-progress", &item);
+        self.persist_item_bg(&item);
+        self.spawn_kill_active(id);
         self.queue_notify.notify_one();
         Ok(())
     }
@@ -541,7 +576,7 @@ impl DownloadManager {
             item.updated_at = unix_now();
             item.clone()
         };
-        self.persist_item(&item).await;
+        self.persist_item_bg(&item);
         self.ensure_worker(app);
         Ok(())
     }
@@ -612,7 +647,7 @@ impl DownloadManager {
     }
 
     pub async fn delete(&self, id: &str) -> Result<(), String> {
-        self.kill_active(id).await;
+        self.spawn_kill_active(id);
         {
             let mut items = self.items.lock().await;
             items.remove(id);
@@ -655,7 +690,7 @@ impl DownloadManager {
             item.clone()
         };
 
-        self.persist_item(&saved).await;
+        self.persist_item_bg(&saved);
         self.cancel_flags.lock().await.insert(id.to_string(), false);
         self.pause_flags.lock().await.insert(id.to_string(), false);
         self.ensure_worker(app);
@@ -771,7 +806,7 @@ impl DownloadManager {
         };
 
         if should_persist {
-            self.persist_item(&item).await;
+            self.persist_item_bg(&item);
         }
         if should_emit {
             let _ = app.emit("download-progress", item);
@@ -789,7 +824,9 @@ impl DownloadManager {
             item.updated_at = unix_now();
             (previous_status, item.clone())
         };
-        self.persist_item(&item).await;
+
+        let _ = app.emit("download-progress", &item);
+        self.persist_item_bg(&item);
 
         if let Some(settings) = self.load_settings() {
             notify::on_status_changed(app, &settings, &item, previous_status);
@@ -800,8 +837,6 @@ impl DownloadManager {
                 self.maybe_notify_queue_idle(app, &settings).await;
             }
         }
-
-        let _ = app.emit("download-progress", &item);
     }
 
     async fn maybe_notify_queue_idle(&self, app: &AppHandle, settings: &AppSettings) {

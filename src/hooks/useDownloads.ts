@@ -2,7 +2,26 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { DownloadItem } from "../types";
+import type { DownloadItem, DownloadStatus } from "../types";
+
+function patchDownload(
+  items: DownloadItem[],
+  id: string,
+  patch: Partial<DownloadItem>
+): DownloadItem[] {
+  return items.map((d) => (d.id === id ? { ...d, ...patch } : d));
+}
+
+function patchAnimeDownloads(
+  items: DownloadItem[],
+  title: string,
+  statuses: DownloadStatus[],
+  patch: Partial<DownloadItem>
+): DownloadItem[] {
+  return items.map((d) =>
+    d.animeTitle === title && statuses.includes(d.status) ? { ...d, ...patch } : d
+  );
+}
 
 export function useDownloads() {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
@@ -28,7 +47,7 @@ export function useDownloads() {
       });
     });
 
-    const interval = setInterval(refresh, 5000);
+    const interval = setInterval(refresh, 10000);
 
     const win = getCurrentWindow();
     const unlistenFocus = win.onFocusChanged(({ payload: focused }) => {
@@ -44,43 +63,112 @@ export function useDownloads() {
   }, [refresh]);
 
   const cancel = async (id: string) => {
-    await invoke("cancel_download", { id });
-    await refresh();
+    setDownloads((prev) =>
+      patchDownload(prev, id, { status: "cancelled", speed: "", progress: 0 })
+    );
+    try {
+      await invoke("cancel_download", { id });
+    } catch {
+      await refresh();
+    }
   };
 
   const pause = async (id: string) => {
-    await invoke("pause_download", { id });
-    await refresh();
+    setDownloads((prev) =>
+      patchDownload(prev, id, { status: "paused", speed: "", progress: 0 })
+    );
+    try {
+      await invoke("pause_download", { id });
+    } catch {
+      await refresh();
+    }
   };
 
   const resume = async (id: string) => {
-    await invoke("resume_download", { id });
-    await refresh();
+    setDownloads((prev) =>
+      patchDownload(prev, id, {
+        status: "queued",
+        speed: "",
+        progress: 0,
+        error: undefined,
+      })
+    );
+    try {
+      await invoke("resume_download", { id });
+    } catch {
+      await refresh();
+    }
   };
 
   const pauseAnime = async (title: string) => {
-    await invoke("pause_anime", { title });
-    await refresh();
+    setDownloads((prev) =>
+      patchAnimeDownloads(prev, title, ["downloading", "queued"], {
+        status: "paused",
+        speed: "",
+        progress: 0,
+      })
+    );
+    try {
+      await invoke("pause_anime", { title });
+    } catch {
+      await refresh();
+    }
   };
 
   const resumeAnime = async (title: string) => {
-    await invoke("resume_anime", { title });
-    await refresh();
+    setDownloads((prev) =>
+      patchAnimeDownloads(prev, title, ["paused"], {
+        status: "queued",
+        speed: "",
+        progress: 0,
+        error: undefined,
+      })
+    );
+    try {
+      await invoke("resume_anime", { title });
+    } catch {
+      await refresh();
+    }
   };
 
   const cancelAnime = async (title: string) => {
-    await invoke("cancel_anime", { title });
-    await refresh();
+    setDownloads((prev) =>
+      patchAnimeDownloads(prev, title, ["downloading", "queued", "paused"], {
+        status: "cancelled",
+        speed: "",
+        progress: 0,
+      })
+    );
+    try {
+      await invoke("cancel_anime", { title });
+    } catch {
+      await refresh();
+    }
   };
 
   const remove = async (id: string) => {
-    await invoke("delete_download", { id });
-    await refresh();
+    setDownloads((prev) => prev.filter((d) => d.id !== id));
+    try {
+      await invoke("delete_download", { id });
+    } catch {
+      await refresh();
+    }
   };
 
   const retry = async (id: string) => {
-    await invoke("retry_download", { id });
-    await refresh();
+    setDownloads((prev) =>
+      patchDownload(prev, id, {
+        status: "queued",
+        speed: "",
+        progress: 0,
+        error: undefined,
+      })
+    );
+    try {
+      await invoke("retry_download", { id });
+    } catch {
+      await refresh();
+    }
   };
 
   return {
