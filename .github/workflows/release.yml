@@ -35,11 +35,46 @@ jobs:
       - name: Stage FFmpeg for bundle
         run: npm run stage-ffmpeg
 
+      - name: Normalize updater signing key
+        shell: pwsh
+        env:
+          RAW_TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          $raw = "$env:RAW_TAURI_SIGNING_PRIVATE_KEY".Trim()
+          if ([string]::IsNullOrWhiteSpace($raw)) {
+            throw "TAURI_SIGNING_PRIVATE_KEY secret is empty."
+          }
+
+          $keyCandidates = @($raw)
+          try {
+            $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($raw))
+            if (-not [string]::IsNullOrWhiteSpace($decoded)) {
+              $keyCandidates += $decoded
+            }
+          } catch {
+            # The secret might already be plain minisign key text.
+          }
+
+          $normalizedKey = $null
+          foreach ($candidate in $keyCandidates) {
+            if ($candidate -match "^\s*untrusted comment:") {
+              $normalizedKey = $candidate -replace "`r`n", "`n"
+              break
+            }
+          }
+
+          if ($null -eq $normalizedKey) {
+            throw "TAURI_SIGNING_PRIVATE_KEY must be minisign key text or base64-encoded minisign key text."
+          }
+
+          $keyPath = Join-Path $env:RUNNER_TEMP "tauri-signing-private.key"
+          Set-Content -Path $keyPath -Value $normalizedKey -Encoding utf8NoBOM -NoNewline
+          "TAURI_SIGNING_PRIVATE_KEY=$keyPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
