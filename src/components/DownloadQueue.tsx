@@ -10,6 +10,10 @@ import { Icon } from "./Icon";
 
 import { VideoPlayer } from "./VideoPlayer";
 import { findNextEpisode } from "../utils/library";
+import {
+  findContinueWatching,
+  formatPlaybackTime,
+} from "../utils/watchProgress";
 
 
 
@@ -375,6 +379,11 @@ export function DownloadQueue({
     [playing, downloads]
   );
 
+  const continueWatching = useMemo(
+    () => findContinueWatching(downloads),
+    [downloads]
+  );
+
 
 
   return (
@@ -398,6 +407,28 @@ export function DownloadQueue({
       </div>
 
 
+
+      {continueWatching && !playing && (
+        <div className="continue-watching-banner">
+          <div className="continue-watching-info">
+            <strong>
+              <Icon name="fa-play" /> Continuar assistindo
+            </strong>
+            <span>
+              {continueWatching.item.animeTitle} ·{" "}
+              {continueWatching.item.episodeLabel} — de{" "}
+              {formatPlaybackTime(continueWatching.progress.position)}
+            </span>
+          </div>
+          <button
+            type="button"
+            className="btn-primary btn-sm"
+            onClick={() => setPlaying(continueWatching.item)}
+          >
+            <Icon name="fa-forward" /> Retomar
+          </button>
+        </div>
+      )}
 
       {playing && (
 

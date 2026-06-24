@@ -3,6 +3,21 @@ import { getVersion } from "@tauri-apps/api/app";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 
+function friendlyUpdateError(message: string): string {
+  const lower = message.toLowerCase();
+  if (
+    lower.includes("valid release json") ||
+    lower.includes("404") ||
+    lower.includes("could not fetch")
+  ) {
+    return "Nenhum release publicado no GitHub ainda (ou o build ainda está em andamento). Tente novamente em alguns minutos.";
+  }
+  if (lower.includes("network") || lower.includes("fetch")) {
+    return "Sem conexão com o GitHub. Verifique sua internet e tente de novo.";
+  }
+  return message;
+}
+
 export type UpdateStatus =
   | "idle"
   | "checking"
@@ -49,7 +64,9 @@ export function useUpdater() {
       setStatus("available");
       return update;
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = friendlyUpdateError(
+        e instanceof Error ? e.message : String(e)
+      );
       setError(message);
       setStatus("error");
       return null;
@@ -89,7 +106,9 @@ export function useUpdater() {
       setStatus("installing");
       await relaunch();
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = friendlyUpdateError(
+        e instanceof Error ? e.message : String(e)
+      );
       setError(message);
       setStatus("error");
     }

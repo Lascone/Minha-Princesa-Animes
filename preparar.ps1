@@ -79,7 +79,7 @@ function Get-SigningKeyPath {
     return $null
 }
 
-function Get-SigningKeyRawContent {
+function Get-SigningKeyEnvValue {
   param(
     [Parameter(Mandatory)][string]$KeyPath
   )
@@ -88,21 +88,6 @@ function Get-SigningKeyRawContent {
   if ([string]::IsNullOrWhiteSpace($raw)) {
     throw "Arquivo de chave vazio: $KeyPath"
   }
-
-  if ($raw.StartsWith("untrusted comment:")) {
-    return $raw
-  }
-
-  try {
-    $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($raw))
-    if ($decoded.StartsWith("untrusted comment:")) {
-      Write-Host "    Chave em base64 detectada; usando conteudo decodificado para o Tauri" -ForegroundColor DarkGray
-      return $decoded.Trim()
-    }
-  } catch {
-    # nao e base64; segue com o conteudo original
-  }
-
   return $raw
 }
 
@@ -117,9 +102,12 @@ function Set-TauriSigningEnv {
     return $false
   }
 
-  $keyContent = Get-SigningKeyRawContent -KeyPath $keyPath
-  $env:TAURI_SIGNING_PRIVATE_KEY = $keyContent
-  $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $Password
+  $env:TAURI_SIGNING_PRIVATE_KEY = Get-SigningKeyEnvValue -KeyPath $keyPath
+  if ([string]::IsNullOrEmpty($Password)) {
+    Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+  } else {
+    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $Password
+  }
   Write-Ok "TAURI_SIGNING_PRIVATE_KEY carregada ($keyPath)"
   return $true
 }
@@ -154,20 +142,20 @@ Depois rode: .\preparar.ps1 -PublishSecrets
   Write-Host "    Nome obrigatorio: TAURI_SIGNING_PRIVATE_KEY" -ForegroundColor DarkGray
   Write-Host "    (NAO use outro nome, ex: MINHAPRINCESAANIMES)" -ForegroundColor DarkGray
 
-  $keyContent = Get-SigningKeyRawContent -KeyPath $keyPath
+  $keyContent = Get-SigningKeyEnvValue -KeyPath $keyPath
   $keyContent | gh secret set TAURI_SIGNING_PRIVATE_KEY
   if ($LASTEXITCODE -ne 0) {
     throw "gh secret set TAURI_SIGNING_PRIVATE_KEY falhou. Rode antes: gh auth login"
   }
 
   if ([string]::IsNullOrEmpty($Password)) {
-    # PowerShell: gh secret set -b "" falha; stdin com string vazia funciona
-  '' | gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+    gh secret delete TAURI_SIGNING_PRIVATE_KEY_PASSWORD 2>$null
+    Write-Host "    Secret de senha removido (chave sem senha)" -ForegroundColor DarkGray
   } else {
     gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body $Password
-  }
-  if ($LASTEXITCODE -ne 0) {
-    throw "gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD falhou (codigo $LASTEXITCODE)"
+    if ($LASTEXITCODE -ne 0) {
+      throw "gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD falhou (codigo $LASTEXITCODE)"
+    }
   }
 
   Write-Ok "Secrets TAURI_SIGNING_PRIVATE_KEY e TAURI_SIGNING_PRIVATE_KEY_PASSWORD configurados"

@@ -1,0 +1,155 @@
+/* Tema Plyr — Minha Princesa Animes */
+.plyr-princesa {
+  --plyr-color-main: #e85d75;
+  --plyr-focus-visible-color: #f07088;
+  --plyr-video-background: #000;
+  --plyr-badge-background: rgba(232, 93, 117, 0.25);
+  --plyr-badge-text-color: #f5f0f8;
+  --plyr-badge-border-radius: 6px;
+  --plyr-captions-background: rgba(10, 8, 16, 0.85);
+  --plyr-captions-text-color: #f5f0f8;
+  --plyr-control-icon-size: 17px;
+  --plyr-control-spacing: 12px;
+  --plyr-control-radius: 8px;
+  --plyr-control-toggle-checked-background: #e85d75;
+  --plyr-video-controls-background: linear-gradient(
+    transparent,
+    rgba(10, 8, 16, 0.55) 35%,
+    rgba(10, 8, 16, 0.92)
+  );
+  --plyr-video-control-color: #f5f0f8;
+  --plyr-video-control-color-hover: #fff;
+  --plyr-video-control-background-hover: rgba(232, 93, 117, 0.85);
+  --plyr-menu-background: rgba(22, 18, 32, 0.96);
+  --plyr-menu-color: #f5f0f8;
+  --plyr-menu-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  --plyr-menu-radius: 10px;
+  --plyr-menu-item-arrow-color: #a89bb5;
+  --plyr-range-fill-background: linear-gradient(90deg, #e85d75, #a78bfa);
+  --plyr-range-track-background: rgba(255, 255, 255, 0.14);
+  --plyr-range-thumb-background: #fff;
+  --plyr-range-thumb-shadow: 0 2px 8px rgba(232, 93, 117, 0.45);
+  --plyr-progress-loading-background: rgba(232, 93, 117, 0.35);
+  --plyr-tooltip-background: rgba(22, 18, 32, 0.95);
+  --plyr-tooltip-color: #f5f0f8;
+  --plyr-tooltip-radius: 6px;
+  --plyr-font-family: "Segoe UI", Inter, system-ui, sans-serif;
+  --plyr-font-size-base: 14px;
+  --plyr-font-size-small: 12px;
+  --plyr-font-size-time: 13px;
+  border-radius: 0;
+  overflow: hidden;
+}
+
+.plyr-princesa .plyr__control--overlaid {
+  background: linear-gradient(135deg, rgba(232, 93, 117, 0.92), rgba(167, 139, 250, 0.88));
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  box-shadow: 0 8px 28px rgba(232, 93, 117, 0.4);
+}
+
+.plyr-princesa .plyr__control--overlaid:hover {
+  background: linear-gradient(135deg, #f07088, #b89aff);
+}
+
+.plyr-princesa .plyr__progress__buffer {
+  color: rgba(255, 255, 255, 0.2);
+}
+
+.plyr-princesa .plyr__volume input[type="range"] {
+  max-width: 72px;
+}
+
+.video-player-shell {
+  position: relative;
+  background: #000;
+}
+
+.video-player-shell .plyr {
+  max-height: 56vh;
+}
+
+.video-player-resume-hint {
+  position: absolute;
+  left: 1rem;
+  bottom: 4.5rem;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.45rem 0.75rem;
+  border-radius: 999px;
+  background: rgba(10, 8, 16, 0.82);
+  border: 1px solid rgba(232, 93, 117, 0.35);
+  color: #f5f0f8;
+  font-size: 0.8rem;
+  pointer-events: none;
+  animation: fadeInUp 0.35s ease both;
+}
+
+.video-player-autonext {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(4px);
+  animation: fadeIn 0.25s ease both;
+}
+
+.video-player-autonext-card {
+  text-align: center;
+  padding: 1.5rem 2rem;
+  border-radius: 14px;
+  background: linear-gradient(160deg, rgba(28, 23, 40, 0.98), rgba(18, 14, 26, 0.98));
+  border: 1px solid rgba(232, 93, 117, 0.3);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  max-width: 360px;
+}
+
+.video-player-autonext-card strong {
+  display: block;
+  margin-bottom: 0.35rem;
+}
+
+.video-player-autonext-card span {
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+}
+
+.video-player-autonext-actions {
+  display: flex;
+  gap: 0.65rem;
+  justify-content: center;
+  margin-top: 1rem;
+}
+
+.continue-watching-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+  padding: 0.9rem 1.1rem;
+  margin-bottom: 1rem;
+  border-radius: calc(var(--radius) + 2px);
+  background: linear-gradient(135deg, rgba(232, 93, 117, 0.14), rgba(139, 92, 246, 0.1));
+  border: 1px solid rgba(232, 93, 117, 0.28);
+  animation: fadeInUp 0.4s ease both;
+}
+
+.continue-watching-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.continue-watching-info strong {
+  font-size: 0.95rem;
+}
+
+.continue-watching-info span {
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+}
