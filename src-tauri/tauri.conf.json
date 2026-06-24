@@ -1,0 +1,59 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Minha Princesa Animes",
+  "mainBinaryName": "Minha Princesa Animes",
+  "version": "0.1.0",
+  "identifier": "com.minhaprincesa.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build && npm run stage-ffmpeg",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Minha Princesa Animes",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$DOWNLOAD/**", "$HOME/**", "$VIDEO/**", "**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "shortDescription": "Minha Princesa Animes — biblioteca e downloader de animes",
+    "longDescription": "Baixe, organize e assista seus animes com a Minha Princesa Animes — sua biblioteca pessoal.",
+    "externalBin": ["binaries/ffmpeg"]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI2Q0E3NkQyM0ZFRkNCOUUKUldTZXkrOC8wbmJLdG9tRXozaXVxRWpHNUpkOTNnSmszZkRJK3crYm1jblR3MFFWU0VndWczTG4K",
+      "endpoints": [
+        "https://github.com/Lascone/Minha-Princesa-Animes/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

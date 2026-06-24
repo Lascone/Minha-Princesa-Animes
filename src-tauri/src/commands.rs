@@ -1,0 +1,326 @@
+use crate::models::{
+    AnimeInfo, AppSettings, BrowseRequest, CatalogPage, CategoryInfo, DownloadItem, DownloadRequest,
+    SearchRequest,
+};
+use crate::state::AppState;
+use crate::sushi::client::SushiClient;
+use crate::sushi::{
+    apply_catalog_filters, browse_catalog as sushi_browse, parse_anime_page, parse_categories,
+    search_catalog as sushi_search,
+};
+use crate::download::{resolve_ffmpeg_path, FfmpegSource};
+use base64::Engine;
+use serde::Serialize;
+use tauri::State;
+
+#[tauri::command]
+pub async fn parse_anime_url(url: String) -> Result<AnimeInfo, String> {
+    let client = SushiClient::new().map_err(|e| e.to_string())?;
+    let normalized = SushiClient::normalize_url(&url);
+
+    if !SushiClient::is_supported_watch_url(&normalized) {
+        return Err(
+            "URL inválida. Cole um link de anime (/anime/...) ou filme (/assistir/...)."
+                .to_string(),
+        );
+    }
+
+    if SushiClient::is_episode_url(&normalized) {
+        let re = regex::Regex::new(r"-\d+-season-\d+-episode").unwrap();
+        let anime_url = re
+            .split(&normalized)
+            .next()
+            .unwrap_or(&normalized)
+            .to_string();
+        return parse_anime_page(&client, &anime_url)
+            .await
+            .map_err(|e| e.to_string());
+    }
+
+    parse_anime_page(&client, &normalized)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn search_catalog(
+    req: SearchRequest,
+    state: State<'_, AppState>,
+) -> Result<CatalogPage, String> {
+    let cache_key = format!(
+        "search:{}:{}:{:?}:{:?}",
+        req.query, req.page, req.filters.media_filter, req.filters.sort
+    );
+    if let Ok(db) = state.db.lock() {
+        if let Ok(Some(_cached)) = db.get_catalog_cache(&cache_key) {
+            // skip cache for search to keep results fresh
+        }
+    }
+
+    let client = SushiClient::new().map_err(|e| e.to_string())?;
+    let result = sushi_search(&client, &req.query, req.page)
+        .await
+        .map_err(|e| e.to_string())?;
+    let result = apply_catalog_filters(result, &req.filters);
+
+    if req.page == 1 && !req.query.is_empty() {
+        if let Ok(db) = state.db.lock() {
+            let _ = db.add_search(&req.query);
+            let _ = db.cache_catalog(&cache_key, &result.items);
+        }
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn browse_catalog(
+    req: BrowseRequest,
+    state: State<'_, AppState>,
+) -> Result<CatalogPage, String> {
+    let cache_key = format!(
+        "browse:{:?}:{}:{}:{:?}:{:?}",
+        req.catalog_type,
+        req.page,
+        req.category_slug.as_deref().unwrap_or(""),
+        req.filters.media_filter,
+        req.filters.sort
+    );
+    if let Ok(db) = state.db.lock() {
+        if let Ok(Some(items)) = db.get_catalog_cache(&cache_key) {
+            return Ok(CatalogPage {
+                items,
+                page: req.page,
+                has_next: true,
+            });
+        }
+    }
+
+    let client = SushiClient::new().map_err(|e| e.to_string())?;
+    let result = sushi_browse(
+        &client,
+        req.catalog_type,
+        req.page,
+        req.category_slug.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let result = apply_catalog_filters(result, &req.filters);
+
+    if let Ok(db) = state.db.lock() {
+        let _ = db.cache_catalog(&cache_key, &result.items);
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn get_categories() -> Result<Vec<CategoryInfo>, String> {
+    let client = SushiClient::new().map_err(|e| e.to_string())?;
+    parse_categories(&client)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_search_history(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.get_search_history().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn start_downloads(
+    app: tauri::AppHandle,
+    request: DownloadRequest,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
+    state
+        .downloads
+        .start(app, request, settings)
+        .await
+}
+
+#[tauri::command]
+pub async fn pause_download(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.downloads.pause(&id).await
+}
+
+#[tauri::command]
+pub async fn resume_download(
+    app: tauri::AppHandle,
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.downloads.resume(app, &id).await
+}
+
+#[tauri::command]
+pub async fn pause_anime(title: String, state: State<'_, AppState>) -> Result<u32, String> {
+    state.downloads.pause_anime(&title).await
+}
+
+#[tauri::command]
+pub async fn resume_anime(
+    app: tauri::AppHandle,
+    title: String,
+    state: State<'_, AppState>,
+) -> Result<u32, String> {
+    state.downloads.resume_anime(app, &title).await
+}
+
+#[tauri::command]
+pub async fn cancel_anime(title: String, state: State<'_, AppState>) -> Result<u32, String> {
+    state.downloads.cancel_anime(&title).await
+}
+
+#[tauri::command]
+pub async fn delete_download(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.downloads.delete(&id).await
+}
+
+#[tauri::command]
+pub async fn cancel_download(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.downloads.cancel(&id).await
+}
+
+#[tauri::command]
+pub async fn retry_download(
+    app: tauri::AppHandle,
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
+    state.downloads.retry(app, &id, settings).await
+}
+
+#[tauri::command]
+pub async fn get_downloads(state: State<'_, AppState>) -> Result<Vec<DownloadItem>, String> {
+    Ok(state.downloads.list().await)
+}
+
+#[tauri::command]
+pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    state
+        .settings
+        .lock()
+        .map(|s| s.clone())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_settings(settings: AppSettings, state: State<'_, AppState>) -> Result<(), String> {
+    let max = settings.max_concurrent.clamp(1, 10);
+    let settings = AppSettings {
+        max_concurrent: max,
+        ..settings
+    };
+    state.downloads.set_max_concurrent(max);
+    {
+        let mut s = state.settings.lock().map_err(|e| e.to_string())?;
+        *s = settings.clone();
+    }
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.save_settings(&settings)
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfmpegInfo {
+    pub path: String,
+    pub available: bool,
+    pub source: String,
+    pub auto_managed: bool,
+}
+
+#[tauri::command]
+pub fn get_ffmpeg_info(state: State<'_, AppState>) -> FfmpegInfo {
+    let configured = state
+        .settings
+        .lock()
+        .map(|s| s.ffmpeg_path.clone())
+        .unwrap_or_default();
+    let resolved = resolve_ffmpeg_path(&configured);
+    FfmpegInfo {
+        available: resolved.source != FfmpegSource::Missing,
+        path: resolved.path,
+        source: resolved.source.label().to_string(),
+        auto_managed: configured.trim().is_empty(),
+    }
+}
+
+#[tauri::command]
+pub fn check_ffmpeg(path: String) -> bool {
+    resolve_ffmpeg_path(&path).source != FfmpegSource::Missing
+}
+
+#[tauri::command]
+pub async fn pick_download_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let folder = app
+        .dialog()
+        .file()
+        .set_title("Selecionar pasta de downloads")
+        .blocking_pick_folder();
+
+    Ok(folder.map(|p| p.to_string()))
+}
+
+fn guess_image_mime(url: &str, bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        return "image/png";
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return "image/jpeg";
+    }
+    if bytes.starts_with(b"RIFF") && bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
+        return "image/webp";
+    }
+    let lower = url.to_lowercase();
+    if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else {
+        "image/jpeg"
+    }
+}
+
+#[tauri::command]
+pub async fn fetch_poster(url: String, state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    {
+        let cache = state.poster_cache.lock().await;
+        if let Some(cached) = cache.get(trimmed) {
+            return Ok(Some(cached.clone()));
+        }
+    }
+
+    let client = SushiClient::new().map_err(|e| e.to_string())?;
+    let bytes = client
+        .fetch_image(trimmed)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if bytes.len() < 128 {
+        return Ok(None);
+    }
+
+    let mime = guess_image_mime(trimmed, &bytes);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let data_url = format!("data:{mime};base64,{encoded}");
+
+    let mut cache = state.poster_cache.lock().await;
+    if cache.len() > 300 {
+        cache.clear();
+    }
+    cache.insert(trimmed.to_string(), data_url.clone());
+
+    Ok(Some(data_url))
+}

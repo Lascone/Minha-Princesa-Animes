@@ -1,0 +1,994 @@
+use crate::db::CacheDb;
+use crate::download::validate::{is_valid_episode_file, should_redownload};
+use crate::download::{build_output_path, ensure_ffmpeg_path, hls};
+use crate::models::{AppSettings, DownloadItem, DownloadRequest, DownloadStatus, EpisodeInfo};
+use crate::sushi::client::SushiClient;
+use crate::sushi::{parse_episode_embed_id, resolve_stream_url, StreamKind};
+use futures_util::StreamExt;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc as StdArc, Mutex};
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
+use tokio::process::Child;
+use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore};
+use uuid::Uuid;
+
+const PROGRESS_EMIT_MIN_MS: u64 = 500;
+const PROGRESS_PERSIST_MIN_MS: u64 = 1000;
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+struct ProgressThrottle {
+    last_emit: Instant,
+    last_persist: Instant,
+    last_progress: f64,
+}
+
+pub struct DownloadManager {
+    items: StdArc<AsyncMutex<HashMap<String, DownloadItem>>>,
+    cancel_flags: StdArc<AsyncMutex<HashMap<String, bool>>>,
+    pause_flags: StdArc<AsyncMutex<HashMap<String, bool>>>,
+    stop_flags: StdArc<AsyncMutex<HashMap<String, StdArc<AtomicBool>>>>,
+    child_slots: StdArc<AsyncMutex<HashMap<String, StdArc<AsyncMutex<Option<Child>>>>>>,
+    semaphore: StdArc<Semaphore>,
+    max_concurrent: StdArc<AtomicU32>,
+    queue_notify: StdArc<Notify>,
+    worker_running: StdArc<AtomicBool>,
+    progress_throttle: StdArc<AsyncMutex<HashMap<String, ProgressThrottle>>>,
+    cached_ffmpeg: StdArc<AsyncMutex<Option<String>>>,
+    db: StdArc<Mutex<CacheDb>>,
+}
+
+impl DownloadManager {
+    pub fn new(db: StdArc<Mutex<CacheDb>>) -> Self {
+        let max = 3usize;
+        Self {
+            items: StdArc::new(AsyncMutex::new(HashMap::new())),
+            cancel_flags: StdArc::new(AsyncMutex::new(HashMap::new())),
+            pause_flags: StdArc::new(AsyncMutex::new(HashMap::new())),
+            stop_flags: StdArc::new(AsyncMutex::new(HashMap::new())),
+            child_slots: StdArc::new(AsyncMutex::new(HashMap::new())),
+            semaphore: StdArc::new(Semaphore::new(max)),
+            max_concurrent: StdArc::new(AtomicU32::new(max as u32)),
+            queue_notify: StdArc::new(Notify::new()),
+            worker_running: StdArc::new(AtomicBool::new(false)),
+            progress_throttle: StdArc::new(AsyncMutex::new(HashMap::new())),
+            cached_ffmpeg: StdArc::new(AsyncMutex::new(None)),
+            db,
+        }
+    }
+
+    pub fn set_max_concurrent(&self, max: u32) {
+        let max = max.clamp(1, 10) as usize;
+        let old = self.max_concurrent.swap(max as u32, Ordering::SeqCst) as usize;
+        if max > old {
+            self.semaphore.add_permits(max - old);
+        }
+    }
+
+    pub async fn restore(&self, mut items: Vec<DownloadItem>) {
+        for item in &mut items {
+            if item.status == DownloadStatus::Paused {
+                continue;
+            }
+            if matches!(
+                item.status,
+                DownloadStatus::Downloading | DownloadStatus::Queued
+            ) {
+                item.status = DownloadStatus::Failed;
+                item.error = Some("Download interrompido ao fechar o app".to_string());
+                item.progress = 0.0;
+                item.speed = String::new();
+            }
+            if item.status == DownloadStatus::Completed {
+                if let Some(ref path) = item.output_path {
+                    if !std::path::Path::new(path).exists() {
+                        item.status = DownloadStatus::Failed;
+                        item.error = Some("Arquivo não encontrado no disco".to_string());
+                        item.output_path = None;
+                    }
+                }
+            }
+        }
+
+        let mut map = self.items.lock().await;
+        for item in items {
+            let _ = self.persist_item_sync(&item);
+            map.insert(item.id.clone(), item);
+        }
+    }
+
+    fn persist_item_sync(&self, item: &DownloadItem) -> Result<(), String> {
+        self.db
+            .lock()
+            .map_err(|e| e.to_string())?
+            .upsert_download(item)
+            .map_err(|e| e.to_string())
+    }
+
+    async fn persist_item(&self, item: &DownloadItem) {
+        let _ = self.persist_item_sync(item);
+    }
+
+    pub async fn list(&self) -> Vec<DownloadItem> {
+        let items = self.items.lock().await;
+        let mut list: Vec<_> = items.values().cloned().collect();
+        list.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| a.anime_title.cmp(&b.anime_title))
+                .then_with(|| a.episode.season.cmp(&b.episode.season))
+                .then_with(|| a.episode.number.cmp(&b.episode.number))
+        });
+        list
+    }
+
+    pub async fn start(
+        &self,
+        app: AppHandle,
+        request: DownloadRequest,
+        settings: AppSettings,
+    ) -> Result<Vec<String>, String> {
+        self.set_max_concurrent(settings.max_concurrent);
+
+        let mut ids = Vec::new();
+        for episode in request.episodes {
+            let id = Uuid::new_v4().to_string();
+            let label = format!(
+                "S{:02}E{:02} - {}",
+                episode.season, episode.number, episode.title
+            );
+            let item = DownloadItem {
+                id: id.clone(),
+                anime_title: request.anime_title.clone(),
+                episode_label: label,
+                episode: episode.clone(),
+                status: DownloadStatus::Queued,
+                progress: 0.0,
+                speed: String::new(),
+                output_path: None,
+                error: None,
+                updated_at: unix_now(),
+            };
+            self.items.lock().await.insert(id.clone(), item.clone());
+            self.persist_item(&item).await;
+            self.cancel_flags.lock().await.insert(id.clone(), false);
+            self.pause_flags.lock().await.insert(id.clone(), false);
+            ids.push(id);
+        }
+
+        self.ensure_worker(app);
+        Ok(ids)
+    }
+
+    fn ensure_worker(&self, app: AppHandle) {
+        if self
+            .worker_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            self.queue_notify.notify_one();
+            return;
+        }
+
+        let mgr = self.clone_inner();
+        tokio::spawn(async move {
+            mgr.worker_loop(app).await;
+        });
+    }
+
+    async fn worker_loop(&self, app: AppHandle) {
+        loop {
+            let mut spawned = false;
+            while let Some((id, anime_title, episode, settings)) = self.next_runnable_job().await
+            {
+                let permit = match self.semaphore.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+
+                spawned = true;
+                let mgr = self.clone_inner();
+                let app_clone = app.clone();
+                tokio::spawn(async move {
+                    mgr.run_download(app_clone, id, anime_title, episode, settings)
+                        .await;
+                    drop(permit);
+                    mgr.queue_notify.notify_one();
+                });
+            }
+
+            if !spawned && !self.has_runnable_jobs().await {
+                self.worker_running.store(false, Ordering::SeqCst);
+                self.queue_notify.notified().await;
+                if !self.has_runnable_jobs().await {
+                    self.worker_running.store(false, Ordering::SeqCst);
+                    break;
+                }
+                if self
+                    .worker_running
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_err()
+                {
+                    continue;
+                }
+            } else if spawned {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            } else {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+    }
+
+    async fn has_runnable_jobs(&self) -> bool {
+        let items = self.items.lock().await;
+        let cancels = self.cancel_flags.lock().await;
+        let pauses = self.pause_flags.lock().await;
+        items.values().any(|i| {
+            i.status == DownloadStatus::Queued
+                && !cancels.get(&i.id).copied().unwrap_or(false)
+                && !pauses.get(&i.id).copied().unwrap_or(false)
+        })
+    }
+
+    async fn next_runnable_job(&self) -> Option<(String, String, EpisodeInfo, AppSettings)> {
+        let settings = self.load_settings()?;
+        let mut candidates: Vec<_> = {
+            let items = self.items.lock().await;
+            let cancels = self.cancel_flags.lock().await;
+            let pauses = self.pause_flags.lock().await;
+            items
+                .values()
+                .filter(|i| {
+                    i.status == DownloadStatus::Queued
+                        && !cancels.get(&i.id).copied().unwrap_or(false)
+                        && !pauses.get(&i.id).copied().unwrap_or(false)
+                })
+                .cloned()
+                .collect()
+        };
+        candidates.sort_by_key(|i| i.updated_at);
+        let item = candidates.first()?;
+        Some((
+            item.id.clone(),
+            item.anime_title.clone(),
+            item.episode.clone(),
+            settings,
+        ))
+    }
+
+    fn load_settings(&self) -> Option<AppSettings> {
+        self.db
+            .lock()
+            .ok()
+            .map(|db| db.load_settings())
+    }
+
+    async fn kill_active(&self, id: &str) {
+        if let Some(flag) = self.stop_flags.lock().await.get(id) {
+            flag.store(true, Ordering::Relaxed);
+        }
+        if let Some(slot) = self.child_slots.lock().await.remove(id) {
+            if let Some(mut child) = slot.lock().await.take() {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+            }
+        }
+    }
+
+    pub async fn cancel(&self, id: &str) -> Result<(), String> {
+        self.kill_active(id).await;
+        let item = {
+            let mut items = self.items.lock().await;
+            let Some(item) = items.get_mut(id) else {
+                return Ok(());
+            };
+            if item.status == DownloadStatus::Downloading
+                || item.status == DownloadStatus::Queued
+                || item.status == DownloadStatus::Paused
+            {
+                self.cancel_flags.lock().await.insert(id.to_string(), true);
+                self.pause_flags.lock().await.insert(id.to_string(), false);
+                item.status = DownloadStatus::Cancelled;
+                item.updated_at = unix_now();
+                item.clone()
+            } else {
+                return Ok(());
+            }
+        };
+        self.persist_item(&item).await;
+        self.queue_notify.notify_one();
+        Ok(())
+    }
+
+    pub async fn pause(&self, id: &str) -> Result<(), String> {
+        self.kill_active(id).await;
+        let item = {
+            let mut items = self.items.lock().await;
+            let Some(item) = items.get_mut(id) else {
+                return Ok(());
+            };
+            if item.status == DownloadStatus::Downloading || item.status == DownloadStatus::Queued
+            {
+                self.pause_flags.lock().await.insert(id.to_string(), true);
+                item.status = DownloadStatus::Paused;
+                item.speed = String::new();
+                item.updated_at = unix_now();
+                item.clone()
+            } else {
+                return Ok(());
+            }
+        };
+        self.persist_item(&item).await;
+        self.queue_notify.notify_one();
+        Ok(())
+    }
+
+    pub async fn resume(&self, app: AppHandle, id: &str) -> Result<(), String> {
+        let item = {
+            let mut items = self.items.lock().await;
+            let Some(item) = items.get_mut(id) else {
+                return Err("Download não encontrado".to_string());
+            };
+            if item.status != DownloadStatus::Paused {
+                return Err("Só é possível retomar downloads pausados".to_string());
+            }
+            self.pause_flags.lock().await.insert(id.to_string(), false);
+            self.cancel_flags.lock().await.insert(id.to_string(), false);
+            item.status = DownloadStatus::Queued;
+            item.progress = 0.0;
+            item.error = None;
+            item.output_path = None;
+            item.speed = String::new();
+            item.updated_at = unix_now();
+            item.clone()
+        };
+        self.persist_item(&item).await;
+        self.ensure_worker(app);
+        Ok(())
+    }
+
+    pub async fn pause_anime(&self, title: &str) -> Result<u32, String> {
+        let ids: Vec<String> = {
+            let items = self.items.lock().await;
+            items
+                .values()
+                .filter(|i| {
+                    i.anime_title == title
+                        && matches!(
+                            i.status,
+                            DownloadStatus::Downloading | DownloadStatus::Queued
+                        )
+                })
+                .map(|i| i.id.clone())
+                .collect()
+        };
+        let mut count = 0u32;
+        for id in ids {
+            self.pause(&id).await?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    pub async fn resume_anime(&self, app: AppHandle, title: &str) -> Result<u32, String> {
+        let ids: Vec<String> = {
+            let items = self.items.lock().await;
+            items
+                .values()
+                .filter(|i| i.anime_title == title && i.status == DownloadStatus::Paused)
+                .map(|i| i.id.clone())
+                .collect()
+        };
+        let mut count = 0u32;
+        for id in ids {
+            self.resume(app.clone(), &id).await?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    pub async fn cancel_anime(&self, title: &str) -> Result<u32, String> {
+        let ids: Vec<String> = {
+            let items = self.items.lock().await;
+            items
+                .values()
+                .filter(|i| {
+                    i.anime_title == title
+                        && matches!(
+                            i.status,
+                            DownloadStatus::Downloading
+                                | DownloadStatus::Queued
+                                | DownloadStatus::Paused
+                        )
+                })
+                .map(|i| i.id.clone())
+                .collect()
+        };
+        let mut count = 0u32;
+        for id in ids {
+            self.cancel(&id).await?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    pub async fn delete(&self, id: &str) -> Result<(), String> {
+        self.kill_active(id).await;
+        {
+            let mut items = self.items.lock().await;
+            items.remove(id);
+        }
+        self.cancel_flags.lock().await.remove(id);
+        self.pause_flags.lock().await.remove(id);
+        self.stop_flags.lock().await.remove(id);
+        self.db
+            .lock()
+            .map_err(|e| e.to_string())?
+            .delete_download(id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub async fn retry(
+        &self,
+        app: AppHandle,
+        id: &str,
+        settings: AppSettings,
+    ) -> Result<(), String> {
+        self.set_max_concurrent(settings.max_concurrent);
+
+        let saved = {
+            let mut items = self.items.lock().await;
+            let item = items
+                .get_mut(id)
+                .ok_or_else(|| "Download não encontrado".to_string())?;
+            if item.status != DownloadStatus::Failed && item.status != DownloadStatus::Cancelled {
+                return Err(
+                    "Só é possível tentar novamente downloads com falha ou cancelados"
+                        .to_string(),
+                );
+            }
+            item.status = DownloadStatus::Queued;
+            item.progress = 0.0;
+            item.error = None;
+            item.output_path = None;
+            item.speed = String::new();
+            item.updated_at = unix_now();
+            item.clone()
+        };
+
+        self.persist_item(&saved).await;
+        self.cancel_flags.lock().await.insert(id.to_string(), false);
+        self.pause_flags.lock().await.insert(id.to_string(), false);
+        self.ensure_worker(app);
+        Ok(())
+    }
+
+    fn clone_inner(&self) -> Self {
+        Self {
+            items: StdArc::clone(&self.items),
+            cancel_flags: StdArc::clone(&self.cancel_flags),
+            pause_flags: StdArc::clone(&self.pause_flags),
+            stop_flags: StdArc::clone(&self.stop_flags),
+            child_slots: StdArc::clone(&self.child_slots),
+            semaphore: StdArc::clone(&self.semaphore),
+            max_concurrent: StdArc::clone(&self.max_concurrent),
+            queue_notify: StdArc::clone(&self.queue_notify),
+            worker_running: StdArc::clone(&self.worker_running),
+            progress_throttle: StdArc::clone(&self.progress_throttle),
+            cached_ffmpeg: StdArc::clone(&self.cached_ffmpeg),
+            db: StdArc::clone(&self.db),
+        }
+    }
+
+    async fn is_stopped(&self, id: &str) -> bool {
+        if self
+            .cancel_flags
+            .lock()
+            .await
+            .get(id)
+            .copied()
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if self.pause_flags.lock().await.get(id).copied().unwrap_or(false) {
+            return true;
+        }
+        if let Some(flag) = self.stop_flags.lock().await.get(id) {
+            if flag.load(Ordering::Relaxed) {
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn get_stop_flag(&self, id: &str) -> StdArc<AtomicBool> {
+        let mut flags = self.stop_flags.lock().await;
+        if let Some(f) = flags.get(id) {
+            return StdArc::clone(f);
+        }
+        let flag = StdArc::new(AtomicBool::new(false));
+        flags.insert(id.to_string(), StdArc::clone(&flag));
+        flag
+    }
+
+    async fn update_progress_throttled(
+        &self,
+        app: &AppHandle,
+        id: &str,
+        progress: f64,
+        speed: &str,
+        force_persist: bool,
+    ) {
+        let now = Instant::now();
+        let (should_emit, should_persist) = {
+            let mut throttle = self.progress_throttle.lock().await;
+            let entry = throttle.entry(id.to_string()).or_insert(ProgressThrottle {
+                last_emit: Instant::now() - Duration::from_secs(10),
+                last_persist: Instant::now() - Duration::from_secs(10),
+                last_progress: 0.0,
+            });
+
+            let emit = now.duration_since(entry.last_emit).as_millis() as u64
+                >= PROGRESS_EMIT_MIN_MS
+                || (progress - entry.last_progress).abs() >= 5.0;
+            let persist = force_persist
+                || now.duration_since(entry.last_persist).as_millis() as u64
+                    >= PROGRESS_PERSIST_MIN_MS;
+
+            if emit {
+                entry.last_emit = now;
+                entry.last_progress = progress;
+            }
+            if persist {
+                entry.last_persist = now;
+            }
+
+            (emit, persist)
+        };
+
+        if !should_emit && !should_persist {
+            return;
+        }
+
+        let item = {
+            let mut items = self.items.lock().await;
+            let Some(item) = items.get_mut(id) else {
+                return;
+            };
+            item.progress = progress;
+            item.speed = speed.to_string();
+            item.updated_at = unix_now();
+            item.clone()
+        };
+
+        if should_persist {
+            self.persist_item(&item).await;
+        }
+        if should_emit {
+            let _ = app.emit("download-progress", item);
+        }
+    }
+
+    async fn update_item(&self, app: &AppHandle, id: &str, update: impl FnOnce(&mut DownloadItem)) {
+        let item = {
+            let mut items = self.items.lock().await;
+            let Some(item) = items.get_mut(id) else {
+                return;
+            };
+            update(item);
+            item.updated_at = unix_now();
+            item.clone()
+        };
+        self.persist_item(&item).await;
+        let _ = app.emit("download-progress", item);
+    }
+
+    async fn run_download(
+        &self,
+        app: AppHandle,
+        id: String,
+        anime_title: String,
+        episode: EpisodeInfo,
+        settings: AppSettings,
+    ) {
+        if self.is_stopped(&id).await {
+            return;
+        }
+
+        let stop_flag = self.get_stop_flag(&id).await;
+        stop_flag.store(false, Ordering::Relaxed);
+
+        self.update_item(&app, &id, |item| {
+            item.status = DownloadStatus::Downloading;
+            item.progress = 0.0;
+        })
+        .await;
+
+        let output_path = build_output_path(&settings, &anime_title, &episode);
+        let referer = Some(episode.url.as_str());
+
+        if output_path.exists()
+            && !settings.overwrite
+            && !should_redownload(&output_path)
+            && is_valid_episode_file(&output_path).is_ok()
+        {
+            self.update_item(&app, &id, |item| {
+                item.status = DownloadStatus::Completed;
+                item.progress = 100.0;
+                item.output_path = Some(output_path.to_string_lossy().to_string());
+            })
+            .await;
+            return;
+        }
+
+        if output_path.exists() && should_redownload(&output_path) {
+            let _ = tokio::fs::remove_file(&output_path).await;
+        }
+
+        let client = match SushiClient::new() {
+            Ok(c) => c,
+            Err(e) => {
+                self.fail(&app, &id, e.to_string()).await;
+                return;
+            }
+        };
+
+        let embed_id = match parse_episode_embed_id(&client, &episode.url).await {
+            Ok(embed) => embed,
+            Err(e) => {
+                self.fail(&app, &id, e.to_string()).await;
+                return;
+            }
+        };
+
+        if self.is_stopped(&id).await {
+            self.handle_stop(&app, &id, &output_path).await;
+            return;
+        }
+
+        let stream = match resolve_stream_url(&client, &embed_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.fail(&app, &id, e.to_string()).await;
+                return;
+            }
+        };
+
+        let result = self
+            .download_with_fallback(
+                &app,
+                &id,
+                &client,
+                &settings,
+                &stream.url,
+                stream.kind,
+                referer,
+                &output_path,
+                stop_flag,
+            )
+            .await;
+
+        match result {
+            Ok(()) => match is_valid_episode_file(&output_path) {
+                Ok(()) => {
+                    self.update_item(&app, &id, |item| {
+                        item.status = DownloadStatus::Completed;
+                        item.progress = 100.0;
+                        item.output_path = Some(output_path.to_string_lossy().to_string());
+                    })
+                    .await;
+                }
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&output_path).await;
+                    self.fail(&app, &id, e).await;
+                }
+            },
+            Err(e) if e == "Cancelado" || e == "Pausado" => {
+                self.handle_stop(&app, &id, &output_path).await;
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&output_path).await;
+                self.fail(&app, &id, e).await;
+            }
+        }
+    }
+
+    async fn handle_stop(&self, app: &AppHandle, id: &str, output_path: &PathBuf) {
+        let _ = tokio::fs::remove_file(output_path).await;
+        let paused = self.pause_flags.lock().await.get(id).copied().unwrap_or(false);
+        let cancelled = self
+            .cancel_flags
+            .lock()
+            .await
+            .get(id)
+            .copied()
+            .unwrap_or(false);
+
+        if paused && !cancelled {
+            self.update_item(app, id, |item| {
+                item.status = DownloadStatus::Paused;
+                item.progress = 0.0;
+                item.speed = String::new();
+            })
+            .await;
+        } else if cancelled {
+            self.update_item(app, id, |item| {
+                item.status = DownloadStatus::Cancelled;
+                item.speed = String::new();
+            })
+            .await;
+        }
+    }
+
+    async fn download_with_fallback(
+        &self,
+        app: &AppHandle,
+        id: &str,
+        client: &SushiClient,
+        settings: &AppSettings,
+        url: &str,
+        kind: StreamKind,
+        referer: Option<&str>,
+        output: &PathBuf,
+        stop_flag: StdArc<AtomicBool>,
+    ) -> Result<(), String> {
+        let primary = match kind {
+            StreamKind::Hls => {
+                self.download_hls(app, id, settings, url, referer, output, stop_flag.clone())
+                    .await
+            }
+            StreamKind::Mp4 => {
+                self.download_mp4(app, id, client, url, referer, output, stop_flag.clone())
+                    .await
+            }
+        };
+
+        if primary.is_ok() {
+            return primary;
+        }
+
+        let primary_err = primary.err().unwrap_or_default();
+        if primary_err == "Cancelado" || primary_err == "Pausado" {
+            return Err(primary_err);
+        }
+
+        if kind == StreamKind::Mp4 {
+            let ffmpeg_path = self.resolved_ffmpeg(settings).await?;
+            if hls::ffmpeg_available(&ffmpeg_path) {
+                return self
+                    .download_hls(app, id, settings, url, referer, output, stop_flag)
+                    .await
+                    .map_err(|e| format!("{primary_err}; fallback HLS: {e}"));
+            }
+        }
+
+        Err(primary_err)
+    }
+
+    async fn resolved_ffmpeg(&self, settings: &AppSettings) -> Result<String, String> {
+        {
+            let cached = self.cached_ffmpeg.lock().await;
+            if let Some(ref p) = *cached {
+                return Ok(p.clone());
+            }
+        }
+        let path = ensure_ffmpeg_path(&settings.ffmpeg_path).await?;
+        *self.cached_ffmpeg.lock().await = Some(path.clone());
+        Ok(path)
+    }
+
+    async fn fail(&self, app: &AppHandle, id: &str, error: String) {
+        self.update_item(app, id, |item| {
+            item.status = DownloadStatus::Failed;
+            item.error = Some(error);
+        })
+        .await;
+    }
+
+    async fn download_hls(
+        &self,
+        app: &AppHandle,
+        id: &str,
+        settings: &AppSettings,
+        url: &str,
+        referer: Option<&str>,
+        output: &PathBuf,
+        stop_flag: StdArc<AtomicBool>,
+    ) -> Result<(), String> {
+        self.update_item(app, id, |item| {
+            item.speed = "Preparando FFmpeg...".to_string();
+        })
+        .await;
+
+        let ffmpeg_path = self.resolved_ffmpeg(settings).await?;
+        let child_slot = StdArc::new(AsyncMutex::new(None::<Child>));
+        self.child_slots
+            .lock()
+            .await
+            .insert(id.to_string(), StdArc::clone(&child_slot));
+        let mgr = self.clone_inner();
+        let app = app.clone();
+        let id_owned = id.to_string();
+
+        let result = hls::download_hls(
+            &ffmpeg_path,
+            url,
+            output,
+            referer,
+            stop_flag.clone(),
+            child_slot,
+            move |progress| {
+                let mgr = mgr.clone_inner();
+                let app = app.clone();
+                let id = id_owned.clone();
+                tauri::async_runtime::spawn(async move {
+                    mgr.update_progress_throttled(&app, &id, progress, "FFmpeg", false)
+                        .await;
+                });
+            },
+        )
+        .await;
+
+        self.child_slots.lock().await.remove(id);
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(hls::HlsError::Cancelled) => {
+                if self.pause_flags.lock().await.get(id).copied().unwrap_or(false) {
+                    Err("Pausado".to_string())
+                } else {
+                    Err("Cancelado".to_string())
+                }
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    async fn download_mp4(
+        &self,
+        app: &AppHandle,
+        id: &str,
+        client: &SushiClient,
+        url: &str,
+        referer: Option<&str>,
+        output: &PathBuf,
+        stop_flag: StdArc<AtomicBool>,
+    ) -> Result<(), String> {
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+
+        let response = client
+            .fetch_stream(url, referer)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if is_playlist_content_type(response.headers().get("content-type")) {
+            return Err("Resposta é playlist HLS, não MP4 direto".to_string());
+        }
+
+        let total = response.content_length().unwrap_or(0);
+        let mut stream = response.bytes_stream();
+        let mut downloaded: u64 = 0;
+        let mut file = tokio::fs::File::create(output)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        use tokio::io::AsyncWriteExt;
+
+        while let Some(chunk) = stream.next().await {
+            if stop_flag.load(Ordering::Relaxed) || self.is_stopped(id).await {
+                let _ = tokio::fs::remove_file(output).await;
+                if self.pause_flags.lock().await.get(id).copied().unwrap_or(false) {
+                    return Err("Pausado".to_string());
+                }
+                return Err("Cancelado".to_string());
+            }
+            let chunk = chunk.map_err(|e| e.to_string())?;
+            file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+            downloaded += chunk.len() as u64;
+
+            let progress = if total > 0 {
+                (downloaded as f64 / total as f64) * 100.0
+            } else {
+                50.0
+            };
+
+            self.update_progress_throttled(app, id, progress, "Baixando...", false)
+                .await;
+        }
+
+        Ok(())
+    }
+}
+
+fn is_playlist_content_type(value: Option<&reqwest::header::HeaderValue>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    let ct = value.to_str().unwrap_or("").to_lowercase();
+    ct.contains("mpegurl")
+        || ct.contains("application/x-mpegurl")
+        || ct.starts_with("text/plain")
+        || ct.starts_with("text/html")
+}
+
+impl Default for DownloadManager {
+    fn default() -> Self {
+        Self::new(StdArc::new(Mutex::new(
+            CacheDb::open().expect("failed to open database"),
+        )))
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::download::hls;
+    use crate::sushi::{parse_episode_embed_id, resolve_stream_url, StreamKind};
+
+    #[tokio::test]
+    #[ignore = "rede + ffmpeg: cargo test download_rezero_ep1 -- --ignored --nocapture"]
+    async fn download_rezero_ep1() {
+        use crate::download::validate::is_valid_episode_file;
+        use futures_util::StreamExt;
+        use std::sync::atomic::AtomicBool;
+
+        let client = SushiClient::new().unwrap();
+        let episode_url = "https://sushianimes.com.br/anime/re-zero-kara-hajimeru-isekai-seikatsu-dublado-989-1-season-1-episode";
+
+        let embed_id = parse_episode_embed_id(&client, episode_url)
+            .await
+            .expect("embed id");
+        let stream = resolve_stream_url(&client, &embed_id)
+            .await
+            .expect("stream");
+
+        let output = std::env::temp_dir().join("shishi_rezero_s01e01_test.mp4");
+        let _ = std::fs::remove_file(&output);
+
+        match stream.kind {
+            StreamKind::Hls => {
+                let ffmpeg = "ffmpeg";
+                assert!(hls::ffmpeg_available(ffmpeg));
+                let stop = StdArc::new(AtomicBool::new(false));
+                let slot = StdArc::new(AsyncMutex::new(None));
+                hls::download_hls(
+                    ffmpeg,
+                    &stream.url,
+                    &output,
+                    Some(episode_url),
+                    stop,
+                    slot,
+                    |_| {},
+                )
+                .await
+                .expect("ffmpeg download");
+            }
+            StreamKind::Mp4 => {
+                let response = client
+                    .fetch_stream(&stream.url, Some(episode_url))
+                    .await
+                    .expect("fetch mp4");
+                let mut file = tokio::fs::File::create(&output).await.unwrap();
+                let mut stream_body = response.bytes_stream();
+                use tokio::io::AsyncWriteExt;
+                while let Some(chunk) = stream_body.next().await {
+                    file.write_all(&chunk.unwrap()).await.unwrap();
+                }
+            }
+        }
+
+        is_valid_episode_file(&output).expect("valid episode file");
+        let _ = std::fs::remove_file(&output);
+    }
+}
