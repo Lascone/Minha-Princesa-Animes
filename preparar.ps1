@@ -15,6 +15,11 @@
 
 .PARAMETER Build
     Apos preparar, executa o build de producao (npm run tauri build).
+    Carrega minha-princesa-animes.key automaticamente para assinar o updater.
+
+.PARAMETER PublishSecrets
+    Envia as chaves de assinatura para o GitHub Actions via gh secret set.
+    Cria TAURI_SIGNING_PRIVATE_KEY e TAURI_SIGNING_PRIVATE_KEY_PASSWORD (vazia se sem senha).
 
 .PARAMETER Dev
     Apos preparar, abre o app em modo desenvolvimento (npm run tauri dev).
@@ -27,13 +32,17 @@
 
 .EXAMPLE
     .\preparar.ps1 -Build
+
+.EXAMPLE
+    .\preparar.ps1 -PublishSecrets
 #>
 
 [CmdletBinding()]
 param(
     [switch]$SkipWinget,
     [switch]$Build,
-    [switch]$Dev
+    [switch]$Dev,
+    [switch]$PublishSecrets
 )
 
 Set-StrictMode -Version Latest
@@ -57,6 +66,90 @@ function Write-Warn([string]$Message) {
 
 function Write-Err([string]$Message) {
     Write-Host "    ERRO  $Message" -ForegroundColor Red
+}
+
+function Get-SigningKeyPath {
+    $candidates = @(
+        (Join-Path $ProjectRoot "minha-princesa-animes.key"),
+        (Join-Path $TauriDir "minha-princesa-animes.key")
+    )
+    foreach ($path in $candidates) {
+        if (Test-Path $path) { return $path }
+    }
+    return $null
+}
+
+function Set-TauriSigningEnv {
+  param(
+    [string]$Password = ""
+  )
+
+  $keyPath = Get-SigningKeyPath
+  if (-not $keyPath) {
+    Write-Warn "Chave privada nao encontrada. Coloque minha-princesa-animes.key na raiz do projeto."
+    return $false
+  }
+
+  $keyContent = (Get-Content -Path $keyPath -Raw).Trim()
+  if ([string]::IsNullOrWhiteSpace($keyContent)) {
+    throw "Arquivo de chave vazio: $keyPath"
+  }
+
+  $env:TAURI_SIGNING_PRIVATE_KEY = $keyContent
+  $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $Password
+  Write-Ok "TAURI_SIGNING_PRIVATE_KEY carregada ($keyPath)"
+  return $true
+}
+
+function Publish-GitHubSigningSecrets {
+  param(
+    [string]$Password = ""
+  )
+
+  if (-not (Test-CommandExists "gh")) {
+    throw "GitHub CLI (gh) nao encontrado. Instale: winget install GitHub.cli"
+  }
+
+  $null = gh auth status 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw @"
+Nao logado no GitHub. Rode em outro terminal (interativo):
+
+  gh auth login
+
+Escolha: GitHub.com -> HTTPS -> Login with a web browser
+Depois rode: .\preparar.ps1 -PublishSecrets
+"@
+  }
+
+  $keyPath = Get-SigningKeyPath
+  if (-not $keyPath) {
+    throw "minha-princesa-animes.key nao encontrado na raiz do projeto."
+  }
+
+  Write-Step "Enviando secrets para GitHub Actions"
+  Write-Host "    Nome obrigatorio: TAURI_SIGNING_PRIVATE_KEY" -ForegroundColor DarkGray
+  Write-Host "    (NAO use outro nome, ex: MINHAPRINCESAANIMES)" -ForegroundColor DarkGray
+
+  $keyContent = (Get-Content -Path $keyPath -Raw).Trim()
+  $keyContent | gh secret set TAURI_SIGNING_PRIVATE_KEY
+  if ($LASTEXITCODE -ne 0) {
+    throw "gh secret set TAURI_SIGNING_PRIVATE_KEY falhou. Rode antes: gh auth login"
+  }
+
+  if ([string]::IsNullOrEmpty($Password)) {
+    # PowerShell: gh secret set -b "" falha; stdin com string vazia funciona
+  '' | gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+  } else {
+    gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body $Password
+  }
+  if ($LASTEXITCODE -ne 0) {
+    throw "gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD falhou (codigo $LASTEXITCODE)"
+  }
+
+  Write-Ok "Secrets TAURI_SIGNING_PRIVATE_KEY e TAURI_SIGNING_PRIVATE_KEY_PASSWORD configurados"
+  Write-Warn "Apague o secret com nome errado (ex: MINHAPRINCESAANIMES) em:"
+  Write-Host "    https://github.com/Lascone/Minha-Princesa-Animes/settings/secrets/actions" -ForegroundColor DarkGray
 }
 
 function Invoke-NativeQuiet {
@@ -343,7 +436,12 @@ function Show-Summary {
     Write-Host ""
     Write-Host "Proximos passos:" -ForegroundColor White
     Write-Host "  Desenvolvimento : npm run tauri dev" -ForegroundColor Gray
-    Write-Host "  Build instalador: npm run tauri build" -ForegroundColor Gray
+    Write-Host "  Build instalador: .\preparar.ps1 -Build" -ForegroundColor Gray
+    Write-Host "  Secrets GitHub : .\preparar.ps1 -PublishSecrets" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Assinatura updater (local + CI):" -ForegroundColor White
+    Write-Host "  Arquivo: minha-princesa-animes.key (na raiz, NUNCA commitar)" -ForegroundColor Gray
+    Write-Host "  GitHub secret: TAURI_SIGNING_PRIVATE_KEY" -ForegroundColor Gray
     Write-Host ""
     Write-Host "Instaladores gerados em:" -ForegroundColor White
     Write-Host "  src-tauri\target\release\bundle\" -ForegroundColor Gray
@@ -373,9 +471,20 @@ Test-RustBuild
 
 Show-Summary
 
+if ($PublishSecrets) {
+    Publish-GitHubSigningSecrets
+}
+
 if ($Build) {
     Write-Step "Preparando FFmpeg para o instalador"
     & (Join-Path $ProjectRoot "scripts\stage-ffmpeg.ps1")
+    Write-Step "Carregando chave de assinatura do updater"
+    if (-not (Set-TauriSigningEnv)) {
+        throw @"
+minha-princesa-animes.key obrigatoria para o build (createUpdaterArtifacts esta ativo).
+Coloque o arquivo na raiz do projeto e rode novamente: .\preparar.ps1 -Build
+"@
+    }
     Write-Step "Gerando instalador de producao"
     try {
         Invoke-TauriCli -TauriArgs @("build")
