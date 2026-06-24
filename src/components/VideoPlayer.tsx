@@ -24,6 +24,7 @@ function VideoPlayerInner({
     src,
     error,
     isLoading,
+    mediaReady,
     resumeHint,
     showResumeChoice,
     pendingResumeTime,
@@ -49,11 +50,13 @@ function VideoPlayerInner({
     );
   }
 
+  const showLoading = isLoading || !src || !mediaReady;
+
   return (
     <div className="video-player-panel video-player-panel--cinema">
       <div className="video-player-cinema-frame">
         <div className="video-player-aspect">
-          {isLoading && (
+          {showLoading && (
             <div className="video-player-loading" aria-hidden="true">
               <div className="video-player-loading-glow" />
               <Icon name="fa-spinner" spin />
@@ -82,14 +85,16 @@ function VideoPlayerInner({
             />
           )}
 
-          <PrincesaVideoSkin>
-            <Video
-              src={src}
-              className="video-player"
-              playsInline
-              preload="metadata"
-            />
-          </PrincesaVideoSkin>
+          {src ? (
+            <PrincesaVideoSkin className="player-princesa-skin">
+              <Video
+                src={src}
+                className="video-player"
+                playsInline
+                preload="auto"
+              />
+            </PrincesaVideoSkin>
+          ) : null}
         </div>
       </div>
     </div>

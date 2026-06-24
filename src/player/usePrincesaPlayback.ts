@@ -42,6 +42,7 @@ export function usePrincesaPlayback({
   onNextEpisode,
 }: UsePrincesaPlaybackOptions) {
   const store = PrincesaPlayer.usePlayer();
+  const media = PrincesaPlayer.useMedia();
   const time = PrincesaPlayer.usePlayer(selectTime);
   const playback = PrincesaPlayer.usePlayer(selectPlayback);
   const volume = PrincesaPlayer.usePlayer(selectVolume);
@@ -234,16 +235,16 @@ export function usePrincesaPlayback({
     }
   }, [clearLoadTimeout, safeSet, store]);
 
-  const loadEpisode = useCallback(
-    (episodeSrc: string, episodeItem: DownloadItem) => {
+  const beginEpisode = useCallback(
+    (episodeItem: DownloadItem) => {
       const token = ++loadTokenRef.current;
       const key = watchProgressKey(episodeItem);
       const savedPosition = getSavedPosition(key);
 
       resetEpisodeUi();
+      clearLoadTimeout();
       safeSet(setIsLoading, true);
       safeSet(setError, "");
-      clearLoadTimeout();
 
       pendingLoadRef.current = {
         token,
@@ -264,25 +265,8 @@ export function usePrincesaPlayback({
         );
         safeSet(setIsLoading, false);
       }, 15000);
-
-      try {
-        store.loadSource(episodeSrc);
-      } catch {
-        clearLoadTimeout();
-        pendingLoadRef.current = null;
-        if (token !== loadTokenRef.current) return;
-        safeSet(setError, "Não foi possível carregar o vídeo");
-        safeSet(setIsLoading, false);
-      }
     },
-    [
-      clearLoadTimeout,
-      finishPendingLoad,
-      resetEpisodeUi,
-      safeSet,
-      store,
-      time?.duration,
-    ]
+    [clearLoadTimeout, finishPendingLoad, resetEpisodeUi, safeSet, time?.duration]
   );
 
   useEffect(() => {
@@ -303,38 +287,41 @@ export function usePrincesaPlayback({
   }, [cancelAutoNext, clearLoadTimeout, time]);
 
   useEffect(() => {
-    if (!prefsAppliedRef.current) {
-      const prefs = loadPlayerPrefs();
-      store.setVolume(prefs.volume);
-      playbackRate?.setPlaybackRate(prefs.speed);
-      prefsAppliedRef.current = true;
-    }
-  }, [playbackRate, store]);
+    if (!media || prefsAppliedRef.current) return;
+    const prefs = loadPlayerPrefs();
+    store.setVolume(prefs.volume);
+    playbackRate?.setPlaybackRate(prefs.speed);
+    prefsAppliedRef.current = true;
+  }, [media, playbackRate, store]);
 
   useEffect(() => {
     if (!item.outputPath) {
       safeSet(setError, "Arquivo não encontrado");
       safeSet(setSrc, "");
       safeSet(setIsLoading, false);
+      pendingLoadRef.current = null;
       return;
     }
+
     try {
       const nextSrc = convertFileSrc(item.outputPath);
-      safeSet(setSrc, nextSrc);
-      safeSet(setError, "");
-      loadEpisode(nextSrc, item);
+      beginEpisode(item);
+      setSrc(nextSrc);
+      setError("");
     } catch (e) {
       safeSet(setError, String(e));
       safeSet(setSrc, "");
       safeSet(setIsLoading, false);
+      pendingLoadRef.current = null;
     }
-  }, [item.id, item.outputPath, loadEpisode, safeSet]);
+  }, [item.id, item.outputPath, beginEpisode, safeSet]);
 
   useEffect(() => {
-    if (canPlay && pendingLoadRef.current) {
+    if (!media || !src || !pendingLoadRef.current) return;
+    if (canPlay) {
       finishPendingLoad();
     }
-  }, [canPlay, finishPendingLoad]);
+  }, [canPlay, finishPendingLoad, media, src]);
 
   useEffect(() => {
     if (!time) return;
@@ -377,11 +364,12 @@ export function usePrincesaPlayback({
   }, [playbackRate?.playbackRate]);
 
   useEffect(() => {
-    if (playerError?.error && !error) {
+    if (playerError?.error && isLoading) {
       safeSet(setError, "Não foi possível reproduzir este episódio");
       safeSet(setIsLoading, false);
+      pendingLoadRef.current = null;
     }
-  }, [playerError?.error, error, safeSet]);
+  }, [playerError?.error, isLoading, safeSet]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -411,6 +399,7 @@ export function usePrincesaPlayback({
     src,
     error,
     isLoading,
+    mediaReady: media !== null,
     resumeHint,
     showResumeChoice,
     pendingResumeTime,
