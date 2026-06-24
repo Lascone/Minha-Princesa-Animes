@@ -119,6 +119,18 @@ export function SettingsPanel() {
         </label>
       </div>
 
+      <div className="setting-group checkbox-group">
+        <label>
+          <input
+            type="checkbox"
+            checked={settings.notifications ?? true}
+            onChange={(e) => update({ notifications: e.target.checked })}
+          />
+          Notificações de download
+        </label>
+        <small>Avisar quando um episódio terminar, falhar ou a fila inteira finalizar.</small>
+      </div>
+
       <UpdateSection />
 
       <button type="button" className="btn-primary" onClick={save}>

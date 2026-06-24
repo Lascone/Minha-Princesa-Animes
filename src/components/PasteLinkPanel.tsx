@@ -125,9 +125,12 @@ export function PasteLinkPanel({ onDownloadStarted, initialUrl = "" }: PasteLink
     try {
 
       await invoke("start_downloads", {
-
-        request: { animeTitle: anime.title, episodes },
-
+        request: {
+          animeTitle: anime.title,
+          episodes,
+          posterUrl: anime.poster,
+          animeUrl: anime.url,
+        },
       });
 
       onDownloadStarted();

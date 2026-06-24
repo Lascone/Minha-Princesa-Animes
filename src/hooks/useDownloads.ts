@@ -1,20 +1,22 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { DownloadItem } from "../types";
 
-export function useDownloads(active = true) {
+export function useDownloads() {
   const [downloads, setDownloads] = useState<DownloadItem[]>([]);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     const items = await invoke<DownloadItem[]>("get_downloads");
     setDownloads(items);
-  };
+  }, []);
 
   useEffect(() => {
     refresh();
     const restoreTimer = setTimeout(refresh, 600);
-    const unlisten = listen<DownloadItem>("download-progress", (event) => {
+
+    const unlistenProgress = listen<DownloadItem>("download-progress", (event) => {
       setDownloads((prev) => {
         const idx = prev.findIndex((d) => d.id === event.payload.id);
         if (idx >= 0) {
@@ -25,15 +27,21 @@ export function useDownloads(active = true) {
         return [...prev, event.payload];
       });
     });
-    const interval = active
-      ? setInterval(refresh, 15000)
-      : undefined;
+
+    const interval = setInterval(refresh, 5000);
+
+    const win = getCurrentWindow();
+    const unlistenFocus = win.onFocusChanged(({ payload: focused }) => {
+      if (focused) refresh();
+    });
+
     return () => {
       clearTimeout(restoreTimer);
-      unlisten.then((fn) => fn());
-      if (interval) clearInterval(interval);
+      clearInterval(interval);
+      unlistenProgress.then((fn) => fn());
+      unlistenFocus.then((fn) => fn());
     };
-  }, [active]);
+  }, [refresh]);
 
   const cancel = async (id: string) => {
     await invoke("cancel_download", { id });

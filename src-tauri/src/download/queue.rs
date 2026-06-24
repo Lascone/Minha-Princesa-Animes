@@ -1,6 +1,6 @@
 use crate::db::CacheDb;
 use crate::download::validate::{is_valid_episode_file, should_redownload};
-use crate::download::{build_output_path, ensure_ffmpeg_path, hls};
+use crate::download::{build_output_path, ensure_ffmpeg_path, hls, notify, poster, wakelock};
 use crate::models::{AppSettings, DownloadItem, DownloadRequest, DownloadStatus, EpisodeInfo};
 use crate::sources::{self, source_for_url, StreamKind};
 use crate::sources::shared::stream::{effective_stream_kind, needs_ffmpeg};
@@ -20,7 +20,7 @@ use uuid::Uuid;
 const PROGRESS_EMIT_MIN_MS: u64 = 500;
 const PROGRESS_PERSIST_MIN_MS: u64 = 1000;
 const MP4_PROGRESS_CHUNK_BYTES: u64 = 512 * 1024;
-const MP4_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+const MP4_STALL_TIMEOUT: Duration = Duration::from_secs(180);
 
 async fn fetch_stream_with_headers(
     url: &str,
@@ -195,8 +195,20 @@ impl DownloadManager {
     }
 
     pub async fn list(&self) -> Vec<DownloadItem> {
+        let settings = self.load_settings();
         let items = self.items.lock().await;
         let mut list: Vec<_> = items.values().cloned().collect();
+
+        if let Some(settings) = settings {
+            for item in &mut list {
+                if item.poster_path.is_none() {
+                    if let Some(path) = poster::find_poster_on_disk(&settings, &item.anime_title) {
+                        item.poster_path = Some(path.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+
         list.sort_by(|a, b| {
             b.updated_at
                 .cmp(&a.updated_at)
@@ -207,6 +219,45 @@ impl DownloadManager {
         list
     }
 
+    async fn existing_poster_for_anime(&self, anime_title: &str) -> (Option<String>, Option<String>) {
+        let items = self.items.lock().await;
+        for item in items.values() {
+            if item.anime_title == anime_title {
+                if let Some(path) = item.poster_path.clone() {
+                    return (item.poster_url.clone(), Some(path));
+                }
+                if let Some(url) = item.poster_url.clone() {
+                    return (Some(url), None);
+                }
+            }
+        }
+        (None, None)
+    }
+
+    async fn apply_poster_to_anime(
+        &self,
+        app: &AppHandle,
+        anime_title: &str,
+        poster_url: &str,
+        poster_path: &PathBuf,
+    ) {
+        let path_str = poster_path.to_string_lossy().to_string();
+        let mut updated: Vec<DownloadItem> = Vec::new();
+        {
+            let mut items = self.items.lock().await;
+            for item in items.values_mut() {
+                if item.anime_title == anime_title {
+                    item.poster_url = Some(poster_url.to_string());
+                    item.poster_path = Some(path_str.clone());
+                    updated.push(item.clone());
+                }
+            }
+        }
+        for item in updated {
+            self.emit_item(app, &item).await;
+        }
+    }
+
     pub async fn start(
         &self,
         app: AppHandle,
@@ -214,6 +265,15 @@ impl DownloadManager {
         settings: AppSettings,
     ) -> Result<Vec<String>, String> {
         self.set_max_concurrent(settings.max_concurrent);
+
+        let (existing_url, existing_path) = self.existing_poster_for_anime(&request.anime_title).await;
+        let disk_path = poster::find_poster_on_disk(&settings, &request.anime_title);
+        let poster_url = request
+            .poster_url
+            .clone()
+            .or(existing_url);
+        let poster_path = existing_path
+            .or_else(|| disk_path.map(|p| p.to_string_lossy().to_string()));
 
         let mut ids = Vec::new();
         for episode in request.episodes {
@@ -232,6 +292,8 @@ impl DownloadManager {
                 speed: String::new(),
                 output_path: None,
                 error: None,
+                poster_url: poster_url.clone(),
+                poster_path: poster_path.clone(),
                 updated_at: unix_now(),
             };
             self.items.lock().await.insert(id.clone(), item.clone());
@@ -239,6 +301,26 @@ impl DownloadManager {
             self.cancel_flags.lock().await.insert(id.clone(), false);
             self.pause_flags.lock().await.insert(id.clone(), false);
             ids.push(id);
+        }
+
+        if poster_path.is_none() {
+            if let Some(url) = poster_url.clone() {
+                let mgr = self.clone_inner();
+                let app_clone = app.clone();
+                let title = request.anime_title.clone();
+                let settings_clone = settings.clone();
+                tokio::spawn(async move {
+                    match poster::ensure_poster(&settings_clone, &title, &url).await {
+                        Ok(path) => {
+                            mgr.apply_poster_to_anime(&app_clone, &title, &url, &path)
+                                .await;
+                        }
+                        Err(err) => {
+                            eprintln!("Falha ao baixar capa de {title}: {err}");
+                        }
+                    }
+                });
+            }
         }
 
         self.ensure_worker(app);
@@ -697,17 +779,60 @@ impl DownloadManager {
     }
 
     async fn update_item(&self, app: &AppHandle, id: &str, update: impl FnOnce(&mut DownloadItem)) {
-        let item = {
+        let (previous_status, item) = {
             let mut items = self.items.lock().await;
             let Some(item) = items.get_mut(id) else {
                 return;
             };
+            let previous_status = item.status.clone();
             update(item);
             item.updated_at = unix_now();
-            item.clone()
+            (previous_status, item.clone())
         };
         self.persist_item(&item).await;
-        let _ = app.emit("download-progress", item);
+
+        if let Some(settings) = self.load_settings() {
+            notify::on_status_changed(app, &settings, &item, previous_status);
+            if matches!(
+                item.status,
+                DownloadStatus::Completed | DownloadStatus::Failed
+            ) {
+                self.maybe_notify_queue_idle(app, &settings).await;
+            }
+        }
+
+        let _ = app.emit("download-progress", &item);
+    }
+
+    async fn maybe_notify_queue_idle(&self, app: &AppHandle, settings: &AppSettings) {
+        if !settings.notifications {
+            return;
+        }
+
+        let summary = {
+            let items = self.items.lock().await;
+            let has_active = items.values().any(|i| {
+                matches!(
+                    i.status,
+                    DownloadStatus::Queued | DownloadStatus::Downloading
+                )
+            });
+            let has_paused = items
+                .values()
+                .any(|i| i.status == DownloadStatus::Paused);
+            if has_active || has_paused {
+                None
+            } else {
+                let failed = items
+                    .values()
+                    .any(|i| i.status == DownloadStatus::Failed);
+                Some(failed)
+            }
+        };
+
+        if let Some(has_failures) = summary {
+            notify::notify_queue_idle(app, has_failures);
+        }
     }
 
     async fn run_download(
@@ -735,6 +860,7 @@ impl DownloadManager {
             mgr: self.clone_inner(),
             id: id.clone(),
         };
+        let _wake = wakelock::WakeGuard::acquire();
 
         if self.is_stopped(&id).await {
             self.restore_stopped_state(&app, &id, None).await;

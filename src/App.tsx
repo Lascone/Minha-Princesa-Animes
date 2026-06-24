@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 import { Sidebar } from "./components/Sidebar";
 import { PasteLinkPanel } from "./components/PasteLinkPanel";
 import { CatalogGrid } from "./components/CatalogGrid";
 import { DownloadQueue } from "./components/DownloadQueue";
-import { SettingsPanel } from "./components/SettingsPanel";
-import { UpdateBanner } from "./components/UpdateBanner";
+import { DownloadNotifications } from "./components/DownloadNotifications";
+import { SettingsPanel } from "./components/SettingsPanel";import { UpdateBanner } from "./components/UpdateBanner";
 import { TrayCloseModal } from "./components/TrayCloseModal";
 import { useDownloads } from "./hooks/useDownloads";
 import type { Page } from "./types";
@@ -24,7 +25,7 @@ function App() {
     resumeAnime,
     cancelAnime,
     remove,
-  } = useDownloads(page === "downloads");
+  } = useDownloads();
 
   const activeCount = downloads.filter(
     (d) => d.status === "downloading" || d.status === "queued"
@@ -35,10 +36,18 @@ function App() {
     setPage("home");
   };
 
+  useEffect(() => {
+    isPermissionGranted().then((granted) => {
+      if (!granted) {
+        requestPermission();
+      }
+    });
+  }, []);
+
   return (
     <div className="app-shell">
       <TrayCloseModal />
-      <Sidebar
+      <DownloadNotifications />      <Sidebar
         current={page}
         onNavigate={setPage}
         activeDownloads={activeCount}

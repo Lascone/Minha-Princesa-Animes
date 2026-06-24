@@ -91,7 +91,12 @@ export function AnimeAnalyzeModal({
     setError("");
     try {
       await invoke("start_downloads", {
-        request: { animeTitle: anime.title, episodes },
+        request: {
+          animeTitle: anime.title,
+          episodes,
+          posterUrl: anime.poster,
+          animeUrl: anime.url,
+        },
       });
       onDownloadStarted?.();
       onClose();

@@ -122,6 +122,10 @@ pub struct DownloadItem {
     pub output_path: Option<String>,
     pub error: Option<String>,
     #[serde(default)]
+    pub poster_url: Option<String>,
+    #[serde(default)]
+    pub poster_path: Option<String>,
+    #[serde(default)]
     pub updated_at: u64,
 }
 
@@ -134,6 +138,12 @@ pub struct AppSettings {
     pub ffmpeg_path: String,
     pub overwrite: bool,
     pub theme: String,
+    #[serde(default = "default_notifications")]
+    pub notifications: bool,
+}
+
+fn default_notifications() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -152,6 +162,7 @@ impl Default for AppSettings {
             ffmpeg_path: String::new(),
             overwrite: false,
             theme: "dark".to_string(),
+            notifications: true,
         }
     }
 }
@@ -161,6 +172,10 @@ impl Default for AppSettings {
 pub struct DownloadRequest {
     pub anime_title: String,
     pub episodes: Vec<EpisodeInfo>,
+    #[serde(default)]
+    pub poster_url: Option<String>,
+    #[serde(default)]
+    pub anime_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

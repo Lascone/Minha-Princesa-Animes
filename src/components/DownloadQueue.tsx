@@ -7,6 +7,7 @@ import type { DownloadFilter, DownloadItem } from "../types";
 import { AppLogo } from "./AppLogo";
 
 import { Icon } from "./Icon";
+import { PosterImage } from "./PosterImage";
 
 import { VideoPlayer } from "./VideoPlayer";
 import { findNextEpisode } from "../utils/library";
@@ -144,6 +145,13 @@ type AnimeGroup = {
   episodes: DownloadItem[];
 
 };
+
+function groupPosterSrc(episodes: DownloadItem[]): string | undefined {
+  const withPath = episodes.find((e) => e.posterPath);
+  if (withPath?.posterPath) return withPath.posterPath;
+  const withUrl = episodes.find((e) => e.posterUrl);
+  return withUrl?.posterUrl;
+}
 
 
 
@@ -650,6 +658,12 @@ function AnimeDownloadGroup({
       >
 
         <Icon name={expanded ? "fa-chevron-down" : "fa-chevron-right"} />
+
+        <PosterImage
+          src={groupPosterSrc(group.episodes)}
+          alt={group.animeTitle}
+          className="download-group-poster"
+        />
 
         <div className="download-group-info">
 

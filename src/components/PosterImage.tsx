@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { AppLogo } from "./AppLogo";
 
 interface PosterImageProps {
@@ -9,6 +9,10 @@ interface PosterImageProps {
 }
 
 const memoryCache = new Map<string, string>();
+
+function isRemoteSrc(src: string) {
+  return /^(https?:|data:)/i.test(src);
+}
 
 export function PosterImage({ src, alt, className = "" }: PosterImageProps) {
   const [resolved, setResolved] = useState<string | null>(null);
@@ -23,6 +27,17 @@ export function PosterImage({ src, alt, className = "" }: PosterImageProps) {
 
     let cancelled = false;
     setFailed(false);
+
+    if (!isRemoteSrc(src)) {
+      try {
+        setResolved(convertFileSrc(src));
+      } catch {
+        setResolved(src);
+      }
+      return () => {
+        cancelled = true;
+      };
+    }
 
     const cached = memoryCache.get(src);
     if (cached) {

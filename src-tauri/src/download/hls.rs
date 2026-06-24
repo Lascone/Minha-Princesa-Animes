@@ -16,7 +16,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
 const LINE_READ_TIMEOUT: Duration = Duration::from_millis(500);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
-const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+const STALL_TIMEOUT: Duration = Duration::from_secs(180);
 const STALL_WARN_AFTER: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Copy)]
