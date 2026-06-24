@@ -140,6 +140,45 @@ impl DownloadManager {
         let _ = self.persist_item_sync(item);
     }
 
+    async fn restore_stopped_state(
+        &self,
+        app: &AppHandle,
+        id: &str,
+        output_path: Option<&PathBuf>,
+    ) {
+        if let Some(path) = output_path {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        let paused = self.pause_flags.lock().await.get(id).copied().unwrap_or(false);
+        let cancelled = self
+            .cancel_flags
+            .lock()
+            .await
+            .get(id)
+            .copied()
+            .unwrap_or(false);
+
+        if paused && !cancelled {
+            self.update_item(app, id, |item| {
+                item.status = DownloadStatus::Paused;
+                item.progress = 0.0;
+                item.speed = String::new();
+            })
+            .await;
+        } else if cancelled {
+            self.update_item(app, id, |item| {
+                item.status = DownloadStatus::Cancelled;
+                item.speed = String::new();
+            })
+            .await;
+        }
+    }
+
+    async fn emit_item(&self, app: &AppHandle, item: &DownloadItem) {
+        self.persist_item(item).await;
+        let _ = app.emit("download-progress", item);
+    }
+
     pub async fn list(&self) -> Vec<DownloadItem> {
         let items = self.items.lock().await;
         let mut list: Vec<_> = items.values().cloned().collect();
@@ -306,7 +345,7 @@ impl DownloadManager {
         }
     }
 
-    pub async fn cancel(&self, id: &str) -> Result<(), String> {
+    pub async fn cancel(&self, app: &AppHandle, id: &str) -> Result<(), String> {
         self.kill_active(id).await;
         let item = {
             let mut items = self.items.lock().await;
@@ -320,18 +359,19 @@ impl DownloadManager {
                 self.cancel_flags.lock().await.insert(id.to_string(), true);
                 self.pause_flags.lock().await.insert(id.to_string(), false);
                 item.status = DownloadStatus::Cancelled;
+                item.speed = String::new();
                 item.updated_at = unix_now();
                 item.clone()
             } else {
                 return Ok(());
             }
         };
-        self.persist_item(&item).await;
+        self.emit_item(app, &item).await;
         self.queue_notify.notify_one();
         Ok(())
     }
 
-    pub async fn pause(&self, id: &str) -> Result<(), String> {
+    pub async fn pause(&self, app: &AppHandle, id: &str) -> Result<(), String> {
         self.kill_active(id).await;
         let item = {
             let mut items = self.items.lock().await;
@@ -342,6 +382,7 @@ impl DownloadManager {
             {
                 self.pause_flags.lock().await.insert(id.to_string(), true);
                 item.status = DownloadStatus::Paused;
+                item.progress = 0.0;
                 item.speed = String::new();
                 item.updated_at = unix_now();
                 item.clone()
@@ -349,7 +390,7 @@ impl DownloadManager {
                 return Ok(());
             }
         };
-        self.persist_item(&item).await;
+        self.emit_item(app, &item).await;
         self.queue_notify.notify_one();
         Ok(())
     }
@@ -378,7 +419,7 @@ impl DownloadManager {
         Ok(())
     }
 
-    pub async fn pause_anime(&self, title: &str) -> Result<u32, String> {
+    pub async fn pause_anime(&self, app: &AppHandle, title: &str) -> Result<u32, String> {
         let ids: Vec<String> = {
             let items = self.items.lock().await;
             items
@@ -395,7 +436,7 @@ impl DownloadManager {
         };
         let mut count = 0u32;
         for id in ids {
-            self.pause(&id).await?;
+            self.pause(app, &id).await?;
             count += 1;
         }
         Ok(count)
@@ -418,7 +459,7 @@ impl DownloadManager {
         Ok(count)
     }
 
-    pub async fn cancel_anime(&self, title: &str) -> Result<u32, String> {
+    pub async fn cancel_anime(&self, app: &AppHandle, title: &str) -> Result<u32, String> {
         let ids: Vec<String> = {
             let items = self.items.lock().await;
             items
@@ -437,7 +478,7 @@ impl DownloadManager {
         };
         let mut count = 0u32;
         for id in ids {
-            self.cancel(&id).await?;
+            self.cancel(app, &id).await?;
             count += 1;
         }
         Ok(count)
@@ -587,6 +628,15 @@ impl DownloadManager {
             let Some(item) = items.get_mut(id) else {
                 return;
             };
+            if matches!(
+                item.status,
+                DownloadStatus::Paused
+                    | DownloadStatus::Cancelled
+                    | DownloadStatus::Completed
+                    | DownloadStatus::Failed
+            ) {
+                return;
+            }
             item.progress = progress;
             item.speed = speed.to_string();
             item.updated_at = unix_now();
@@ -624,18 +674,34 @@ impl DownloadManager {
         settings: AppSettings,
     ) {
         if self.is_stopped(&id).await {
+            self.restore_stopped_state(&app, &id, None).await;
             return;
         }
 
         let stop_flag = self.get_stop_flag(&id).await;
+        if self.is_stopped(&id).await {
+            self.restore_stopped_state(&app, &id, None).await;
+            return;
+        }
         stop_flag.store(false, Ordering::Relaxed);
 
         self.update_item(&app, &id, |item| {
+            if matches!(
+                item.status,
+                DownloadStatus::Paused | DownloadStatus::Cancelled
+            ) {
+                return;
+            }
             item.status = DownloadStatus::Downloading;
             item.progress = 0.0;
             item.speed = "Resolvendo link do vídeo...".to_string();
         })
         .await;
+
+        if self.is_stopped(&id).await {
+            self.restore_stopped_state(&app, &id, None).await;
+            return;
+        }
 
         let output_path = build_output_path(&settings, &anime_title, &episode);
 
@@ -668,13 +734,17 @@ impl DownloadManager {
         let stream = match sources::resolve_stream(source, &episode.url).await {
             Ok(s) => s,
             Err(e) => {
+                if self.is_stopped(&id).await {
+                    self.restore_stopped_state(&app, &id, Some(&output_path)).await;
+                    return;
+                }
                 self.fail(&app, &id, e.to_string()).await;
                 return;
             }
         };
 
         if self.is_stopped(&id).await {
-            self.handle_stop(&app, &id, &output_path).await;
+            self.restore_stopped_state(&app, &id, Some(&output_path)).await;
             return;
         }
 
@@ -708,39 +778,12 @@ impl DownloadManager {
                 }
             },
             Err(e) if e == "Cancelado" || e == "Pausado" => {
-                self.handle_stop(&app, &id, &output_path).await;
+                self.restore_stopped_state(&app, &id, Some(&output_path)).await;
             }
             Err(e) => {
                 let _ = tokio::fs::remove_file(&output_path).await;
                 self.fail(&app, &id, e).await;
             }
-        }
-    }
-
-    async fn handle_stop(&self, app: &AppHandle, id: &str, output_path: &PathBuf) {
-        let _ = tokio::fs::remove_file(output_path).await;
-        let paused = self.pause_flags.lock().await.get(id).copied().unwrap_or(false);
-        let cancelled = self
-            .cancel_flags
-            .lock()
-            .await
-            .get(id)
-            .copied()
-            .unwrap_or(false);
-
-        if paused && !cancelled {
-            self.update_item(app, id, |item| {
-                item.status = DownloadStatus::Paused;
-                item.progress = 0.0;
-                item.speed = String::new();
-            })
-            .await;
-        } else if cancelled {
-            self.update_item(app, id, |item| {
-                item.status = DownloadStatus::Cancelled;
-                item.speed = String::new();
-            })
-            .await;
         }
     }
 
