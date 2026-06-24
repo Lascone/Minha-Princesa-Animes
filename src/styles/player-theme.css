@@ -399,3 +399,43 @@
   color: var(--text-secondary);
   font-size: 0.82rem;
 }
+
+/* Fullscreen — remove inline size caps so video fills the viewport */
+.media-princesa-skin:fullscreen,
+.player-princesa-skin:fullscreen,
+.media-default-skin.player-princesa-skin:fullscreen {
+  max-height: none;
+  aspect-ratio: auto;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+.media-princesa-skin:fullscreen .video-player,
+.media-princesa-skin:fullscreen video,
+.player-princesa-skin:fullscreen .video-player,
+.player-princesa-skin:fullscreen video {
+  max-height: none;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.media-princesa-skin:-webkit-full-screen,
+.player-princesa-skin:-webkit-full-screen {
+  max-height: none;
+  aspect-ratio: auto;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+.media-princesa-skin:-webkit-full-screen .video-player,
+.media-princesa-skin:-webkit-full-screen video,
+.player-princesa-skin:-webkit-full-screen .video-player,
+.player-princesa-skin:-webkit-full-screen video {
+  max-height: none;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
